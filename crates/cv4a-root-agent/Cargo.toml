@@ -1,0 +1,18 @@
+[package]
+name = "cv4a-root-agent"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+
+[dependencies]
+clash-verge-mobile = { path = "../clash-verge-mobile" }
+libc = "0.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "gzip", "rustls"] }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+webpki-roots = "1.0.9"
+
+[dev-dependencies]
+tempfile = "3"
+

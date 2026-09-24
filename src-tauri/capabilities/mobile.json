@@ -1,0 +1,14 @@
+{
+  "identifier": "mobile-capability",
+  "description": "Android UI uses the typed Rust mobile commands only.",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:allow-remove"
+  ]
+}

@@ -1,0 +1,6 @@
+id=adb_fixed_tcp
+name=ADB Fixed TCP Port
+author=AloofBuckle
+version=0.1.0
+versionCode=100
+description=Starts authenticated TCP ADB on port 40000 at boot and disables Android's random-port Wireless debugging service.

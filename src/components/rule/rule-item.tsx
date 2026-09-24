@@ -1,6 +1,4 @@
 import { styled, Box, Typography } from '@mui/material'
-import { Rule } from 'tauri-plugin-mihomo-api'
-
 const Item = styled(Box)(({ theme }) => ({
   display: 'flex',
   padding: '4px 16px',
@@ -16,7 +14,12 @@ const COLOR = [
 ]
 
 interface Props {
-  value: Rule & { lineNo: number }
+  value: {
+    type: string | { Unknown: string }
+    payload: string
+    proxy: string
+    lineNo: number
+  }
 }
 
 const parseColor = (text: string) => {

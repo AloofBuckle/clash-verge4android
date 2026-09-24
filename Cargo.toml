@@ -1,6 +1,9 @@
 [workspace]
 members = [
   "src-tauri",
+  "crates/cv4a-root-agent",
+  "crates/cv4a-mihomo-client",
+  "crates/clash-verge-mobile",
   "crates/clash-verge-draft",
   "crates/clash-verge-media-unlock",
   "crates/clash-verge-logging",

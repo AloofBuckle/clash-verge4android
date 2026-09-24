@@ -17,3 +17,7 @@ target
 .vfox
 .claude
 .zed
+
+.local-artifacts/
+dist-mobile/
+*.keystore

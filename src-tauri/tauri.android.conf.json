@@ -1,0 +1,46 @@
+{
+  "productName": "Clash Verge for Android",
+  "identifier": "io.github.aloofbuckle.cv4android",
+  "version": "0.1.0-alpha.1",
+  "build": {
+    "beforeDevCommand": "pnpm run mobile:dev",
+    "beforeBuildCommand": "pnpm run mobile:build",
+    "frontendDist": "../dist-mobile",
+    "devUrl": "http://localhost:1420",
+    "removeUnusedCommands": false
+  },
+  "bundle": {
+    "externalBin": [],
+    "resources": [],
+    "createUpdaterArtifacts": false,
+    "android": {
+      "minSdkVersion": 29,
+      "versionCode": 1
+    },
+    "publisher": "AloofBuckle",
+    "shortDescription": "Clash Verge for Android"
+  },
+  "plugins": {
+    "updater": null,
+    "deep-link": null
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Clash Verge for Android",
+        "width": 412,
+        "height": 860,
+        "resizable": true,
+        "devtools": true
+      }
+    ],
+    "security": {
+      "capabilities": ["mobile-capability"],
+      "assetProtocol": {
+        "enable": false
+      },
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'self'"
+    }
+  }
+}

@@ -32,6 +32,27 @@ identifier = "io.github.clash-verge-rev.clash-verge-rev"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
+tauri = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri = { workspace = true, features = ["devtools"] }
+clash-verge-mobile = { path = "../crates/clash-verge-mobile" }
+cv4a-mihomo-client = { path = "../crates/cv4a-mihomo-client" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "net"] }
+reqwest = { workspace = true }
+rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+webpki-roots = "1.0.9"
+flate2 = "1.1.10"
+chrono = { workspace = true }
+percent-encoding = "2.3.2"
+reqwest_dav = "0.3.3"
+network-interface = { version = "2.0.5", features = ["serde"] }
+tauri-plugin-dialog = "2.7.3"
+tauri-plugin-fs = "2.5.2"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
 clash-verge-draft = { workspace = true }
 clash-verge-media-unlock = { workspace = true }
 clash-verge-logging = { workspace = true }

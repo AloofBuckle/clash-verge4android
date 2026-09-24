@@ -38,7 +38,14 @@
     "perf:build": "node scripts/perf/build.mjs",
     "perf:run": "node scripts/perf/run.mjs",
     "perf:compare": "node scripts/perf/compare.mjs",
-    "perf:test": "node --test scripts/perf/report.test.mjs"
+    "perf:test": "node --test scripts/perf/report.test.mjs",
+    "mobile:dev": "vite --config vite.mobile.config.mts",
+    "mobile:build": "tsc --project tsconfig.mobile.json && vite build --config vite.mobile.config.mts",
+    "mobile:test": "cargo test -p clash-verge-mobile && pnpm run mobile:build",
+    "mobile:test:device": "node --test scripts/mobile.e2e.mjs",
+    "android:init": "node scripts/android.mjs init",
+    "android:build": "node scripts/android.mjs build",
+    "android:dev": "node scripts/android.mjs dev"
   },
   "dependencies": {
     "@dnd-kit/collision": "^0.5.0",

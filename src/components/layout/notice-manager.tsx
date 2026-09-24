@@ -149,15 +149,24 @@ const resolveNoticeCopyText = (
 
 interface NoticeManagerProps {
   position?: NoticePosition | null
+  centerYRatio?: number | null
 }
 
-export const NoticeManager: React.FC<NoticeManagerProps> = ({ position }) => {
+export const NoticeManager: React.FC<NoticeManagerProps> = ({
+  position,
+  centerYRatio,
+}) => {
   const { t } = useTranslation()
   const resolvedPosition = useMemo(() => resolvePosition(position), [position])
   const anchorOrigin = useMemo(
     () => getAnchorOrigin(resolvedPosition),
     [resolvedPosition],
   )
+  const centered =
+    typeof centerYRatio === 'number' &&
+    Number.isFinite(centerYRatio) &&
+    centerYRatio > 0 &&
+    centerYRatio < 1
   const currentNotices = useSyncExternalStore(
     subscribeNotices,
     getSnapshotNotices,
@@ -188,14 +197,32 @@ export const NoticeManager: React.FC<NoticeManagerProps> = ({ position }) => {
     <Box
       sx={{
         position: 'fixed',
-        top: anchorOrigin.vertical === 'top' ? '20px' : 'auto',
-        bottom: anchorOrigin.vertical === 'bottom' ? '20px' : 'auto',
-        left: anchorOrigin.horizontal === 'left' ? '20px' : 'auto',
-        right: anchorOrigin.horizontal === 'right' ? '20px' : 'auto',
+        top: centered
+          ? `${centerYRatio! * 100}dvh`
+          : anchorOrigin.vertical === 'top'
+            ? '20px'
+            : 'auto',
+        bottom: centered
+          ? 'auto'
+          : anchorOrigin.vertical === 'bottom'
+            ? '20px'
+            : 'auto',
+        left: centered
+          ? '50%'
+          : anchorOrigin.horizontal === 'left'
+            ? '20px'
+            : 'auto',
+        right: centered
+          ? 'auto'
+          : anchorOrigin.horizontal === 'right'
+            ? '20px'
+            : 'auto',
+        transform: centered ? 'translate(-50%, -50%)' : 'none',
         zIndex: 1500,
         display: 'flex',
         flexDirection: 'column',
         gap: '10px',
+        width: centered ? 'min(360px, calc(100vw - 32px))' : undefined,
         maxWidth: '360px',
       }}
     >

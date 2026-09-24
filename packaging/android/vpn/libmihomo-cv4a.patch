@@ -1,0 +1,392 @@
+diff --git a/src/main/cpp/bridge.h b/src/main/cpp/bridge.h
+index 89d4eab..fbb8e15 100644
+--- a/src/main/cpp/bridge.h
++++ b/src/main/cpp/bridge.h
+@@ -6,14 +6,14 @@ extern void (*release_object_func)(void *obj);
+ 
+ extern void (*free_string_func)(char *data);
+ 
+-extern void (*protect_func)(void *tun_interface, int fd);
++extern int (*protect_func)(void *tun_interface, int fd);
+ 
+ extern char *(*resolve_process_func)(void *tun_interface, int protocol, const char *source,
+                                      const char *target, int uid);
+ 
+ extern void (*result_func)(void *invoke_interface, const char *data);
+ 
+-extern void protect(void *tun_interface, int fd);
++extern int protect(void *tun_interface, int fd);
+ 
+ extern char *resolve_process(void *tun_interface, int protocol, const char *source,
+                              const char *target, int uid);
+diff --git a/src/main/cpp/libclash.h b/src/main/cpp/libclash.h
+index 05140f8..252cbea 100644
+--- a/src/main/cpp/libclash.h
++++ b/src/main/cpp/libclash.h
+@@ -81,7 +81,7 @@ extern "C" {
+ 
+ extern void invokeAction(void* callback, char* paramsChar);
+ extern void quickSetup(void* callback, char* initParamsChar, char* setupParamsChar);
+-extern void startTUN(void* callback, int fd, char* deviceChar, char* stackChar, char* addressChar, char* dnsChar, int mtu);
++extern char* startTUN(void* callback, int fd, char* deviceChar, char* stackChar, char* addressChar, char* dnsChar, int mtu);
+ extern void stopTun(void);
+ extern void setEventListener(void* listener);
+ extern char* getTraffic(void);
+@@ -95,9 +95,9 @@ extern int  bridgeABI(void);
+ }
+ #endif
+ 
+-#define LIBCLASH_EXPECTED_BRIDGE_ABI 2
++#define LIBCLASH_EXPECTED_BRIDGE_ABI 5
+ 
+-_Static_assert(LIBCLASH_EXPECTED_BRIDGE_ABI == 2,
++_Static_assert(LIBCLASH_EXPECTED_BRIDGE_ABI == 5,
+                "Update native-lib.cpp + Kotlin EXPECTED_BRIDGE_ABI together when bumping.");
+ 
+ #endif /* VENDORED_LIBCLASH_H */
+diff --git a/src/main/cpp/native-lib.cpp b/src/main/cpp/native-lib.cpp
+index a79c72c..1f16716 100644
+--- a/src/main/cpp/native-lib.cpp
++++ b/src/main/cpp/native-lib.cpp
+@@ -6,13 +6,16 @@
+ #include "bridge.h"
+ 
+ extern "C"
+-JNIEXPORT void JNICALL
++JNIEXPORT jstring JNICALL
+ Java_io_github_oviron_libmihomo_Clash_nativeStartTUN(JNIEnv *env, jclass clazz, jint fd,
+                                                      jobject cb, jstring device, jstring stack,
+                                                      jstring address, jstring dns, jint mtu) {
+     const auto interface = new_global(cb);
+-    startTUN(interface, fd, get_string(device), get_string(stack), get_string(address),
+-             get_string(dns), mtu);
++    auto result = startTUN(interface, fd, get_string(device), get_string(stack), get_string(address),
++                           get_string(dns), mtu);
++    const auto output = new_string(result);
++    release_string(&result);
++    return output;
+ }
+ 
+ extern "C"
+@@ -108,11 +111,18 @@ static void free_string_impl(char *str) {
+     free(str);
+ }
+ 
+-static void call_tun_interface_protect_impl(void *tun_interface, const int fd) {
++static int call_tun_interface_protect_impl(void *tun_interface, const int fd) {
++    if (tun_interface == nullptr) {
++        return 0;
++    }
+     ATTACH_JNI();
+-    env->CallVoidMethod(static_cast<jobject>(tun_interface),
+-                        m_tun_interface_protect,
+-                        fd);
++    const auto result = env->CallBooleanMethod(static_cast<jobject>(tun_interface),
++                                               m_tun_interface_protect,
++                                               fd);
++    if (jni_catch_exception(env)) {
++        return 0;
++    }
++    return result == JNI_TRUE ? 1 : 0;
+ }
+ 
+ static char *
+@@ -157,7 +167,7 @@ JNI_OnLoad(JavaVM *vm, void *) {
+     const auto c_tun_interface = find_class("io/github/oviron/libmihomo/TunInterface");
+     const auto c_invoke_interface = find_class("io/github/oviron/libmihomo/InvokeInterface");
+ 
+-    m_tun_interface_protect = find_method(c_tun_interface, "protect", "(I)V");
++    m_tun_interface_protect = find_method(c_tun_interface, "protect", "(I)Z");
+     m_tun_interface_resolve_process = find_method(c_tun_interface, "resolverProcess",
+                                                   "(ILjava/lang/String;Ljava/lang/String;I)Ljava/lang/String;");
+     m_invoke_interface_result = find_method(c_invoke_interface, "onResult",
+diff --git a/src/main/jni/core/bridge.c b/src/main/jni/core/bridge.c
+index eeab966..1380e2e 100644
+--- a/src/main/jni/core/bridge.c
++++ b/src/main/jni/core/bridge.c
+@@ -4,14 +4,14 @@ void (*release_object_func)(void *obj);
+ 
+ void (*free_string_func)(char *data);
+ 
+-void (*protect_func)(void *tun_interface, int fd);
++int (*protect_func)(void *tun_interface, int fd);
+ 
+ char* (*resolve_process_func)(void *tun_interface,int protocol, const char *source, const char *target, int uid);
+ 
+ void (*result_func)(void *invoke_Interface, const char *data);
+ 
+-void protect(void *tun_interface, int fd) {
+-    protect_func(tun_interface, fd);
++int protect(void *tun_interface, int fd) {
++    return protect_func(tun_interface, fd);
+ }
+ 
+ char* resolve_process(void *tun_interface, int protocol, const char *source, const char *target, int uid) {
+@@ -28,4 +28,4 @@ void free_string(char *data) {
+ 
+ void result(void *invoke_Interface, const char *data) {
+     return result_func(invoke_Interface, data);
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/jni/core/bridge.go b/src/main/jni/core/bridge.go
+index 2bfdd1e..18e6315 100644
+--- a/src/main/jni/core/bridge.go
++++ b/src/main/jni/core/bridge.go
+@@ -6,8 +6,8 @@ package main
+ import "C"
+ import "unsafe"
+ 
+-func protect(callback unsafe.Pointer, fd int) {
+-	C.protect(callback, C.int(fd))
++func protect(callback unsafe.Pointer, fd int) bool {
++	return C.protect(callback, C.int(fd)) != 0
+ }
+ 
+ func resolveProcess(callback unsafe.Pointer, protocol int, source, target string, uid int) string {
+diff --git a/src/main/jni/core/bridge.h b/src/main/jni/core/bridge.h
+index ec18853..b9b828a 100644
+--- a/src/main/jni/core/bridge.h
++++ b/src/main/jni/core/bridge.h
+@@ -6,13 +6,13 @@ extern void (*release_object_func)(void *obj);
+ 
+ extern void (*free_string_func)(char *data);
+ 
+-extern void (*protect_func)(void *tun_interface, int fd);
++extern int (*protect_func)(void *tun_interface, int fd);
+ 
+ extern char* (*resolve_process_func)(void *tun_interface, int protocol, const char *source, const char *target, int uid);
+ 
+ extern void (*result_func)(void *invoke_Interface, const char *data);
+ 
+-extern void protect(void *tun_interface, int fd);
++extern int protect(void *tun_interface, int fd);
+ 
+ extern char* resolve_process(void *tun_interface, int protocol, const char *source, const char *target, int uid);
+ 
+@@ -20,4 +20,4 @@ extern void release_object(void *obj);
+ 
+ extern void free_string(char *data);
+ 
+-extern void result(void *invoke_Interface,  const char *data);
+\ No newline at end of file
++extern void result(void *invoke_Interface,  const char *data);
+diff --git a/src/main/jni/core/lib.go b/src/main/jni/core/lib.go
+index 696627b..87e644a 100644
+--- a/src/main/jni/core/lib.go
++++ b/src/main/jni/core/lib.go
+@@ -53,7 +53,7 @@ type TunHandler struct {
+ 	limit *semaphore.Weighted
+ }
+ 
+-func (th *TunHandler) start(fd int, device, stack, address, dns string, mtu int) {
++func (th *TunHandler) start(fd int, device, stack, address, dns string, mtu int) error {
+ 	runLock.Lock()
+ 	defer runLock.Unlock()
+ 	_ = th.limit.Acquire(context.Background(), tunSemFullLock)
+@@ -63,9 +63,10 @@ func (th *TunHandler) start(fd int, device, stack, address, dns string, mtu int)
+ 	if err != nil {
+ 		log.Errorln("TUN start failed: %v", err)
+ 		th.clear()
+-		return
++		return err
+ 	}
+ 	th.listener = listener
++	return nil
+ }
+ 
+ func (th *TunHandler) close() {
+@@ -87,13 +88,16 @@ func (th *TunHandler) clear() {
+ 	}
+ }
+ 
+-func (th *TunHandler) handleProtect(fd int) {
++func (th *TunHandler) handleProtect(fd int) error {
+ 	_ = th.limit.Acquire(context.Background(), 1)
+ 	defer th.limit.Release(1)
+-	if th.closed {
+-		return
++	if th.closed || th.callback == nil {
++		return errTunNotReady
++	}
++	if !protect(th.callback, fd) {
++		return errProtectRefused
+ 	}
+-	protect(th.callback, fd)
++	return nil
+ }
+ 
+ func (th *TunHandler) handleResolveProcess(source, target net.Addr) string {
+@@ -121,9 +125,13 @@ func (th *TunHandler) initHook() {
+ 		if platform.ShouldBlockConnection() {
+ 			return errBlocked
+ 		}
+-		return conn.Control(func(fd uintptr) {
+-			tunHandler.handleProtect(int(fd))
+-		})
++		var protectErr error
++		if err := conn.Control(func(fd uintptr) {
++			protectErr = tunHandler.handleProtect(int(fd))
++		}); err != nil {
++			return err
++		}
++		return protectErr
+ 	}
+ 	process.DefaultPackageNameResolver = func(metadata *constant.Metadata) (string, error) {
+ 		src, dst := metadata.RawSrcAddr, metadata.RawDstAddr
+@@ -147,9 +155,11 @@ func (th *TunHandler) removeHook() {
+ }
+ 
+ var (
+-	tunLock    sync.Mutex
+-	errBlocked = errors.New("blocked")
+-	tunHandler *TunHandler
++	tunLock           sync.Mutex
++	errBlocked        = errors.New("blocked")
++	errTunNotReady    = errors.New("Android VPN TUN is not ready")
++	errProtectRefused = errors.New("VpnService.protect refused outbound socket")
++	tunHandler        *TunHandler
+ )
+ 
+ // stopTunLocked tears down the active TunHandler; caller must hold tunLock.
+@@ -165,7 +175,7 @@ func handleStopTun() {
+ 	stopTunLocked()
+ }
+ 
+-func handleStartTun(callback unsafe.Pointer, fd int, device, stack, address, dns string, mtu int) {
++func handleStartTun(callback unsafe.Pointer, fd int, device, stack, address, dns string, mtu int) error {
+ 	tunLock.Lock()
+ 	defer tunLock.Unlock()
+ 	stopTunLocked()
+@@ -174,13 +184,17 @@ func handleStartTun(callback unsafe.Pointer, fd int, device, stack, address, dns
+ 		// us; release here so the global ref does not leak when the caller
+ 		// passes fd=0 (no TUN to start).
+ 		releaseObject(callback)
+-		return
++		return errors.New("invalid TUN file descriptor")
+ 	}
+ 	tunHandler = &TunHandler{
+ 		callback: callback,
+ 		limit:    semaphore.NewWeighted(tunSemCapacity),
+ 	}
+-	tunHandler.start(fd, device, stack, address, dns, mtu)
++	if err := tunHandler.start(fd, device, stack, address, dns, mtu); err != nil {
++		tunHandler = nil
++		return err
++	}
++	return nil
+ }
+ 
+ func handleUpdateDns(value string) {
+@@ -227,16 +241,19 @@ func invokeAction(callback unsafe.Pointer, paramsChar *C.char) {
+ // and metrics. `stack` is "system" | "gvisor" | "mixed". `address` is a
+ // comma-separated CIDR list (IPv4/IPv6). `dns` is a comma-separated host list
+ // hijacked to port 53. `mtu` is the tun MTU (<=0 falls back to the default).
+-// Returns asynchronously through callback.
++// Returns an owned C string: empty on success, otherwise the TUN startup error.
+ //
+ //export startTUN
+-func startTUN(callback unsafe.Pointer, fd C.int, deviceChar, stackChar, addressChar, dnsChar *C.char, mtu C.int) {
+-	handleStartTun(callback, int(fd), takeCString(deviceChar), takeCString(stackChar), takeCString(addressChar), takeCString(dnsChar), int(mtu))
++func startTUN(callback unsafe.Pointer, fd C.int, deviceChar, stackChar, addressChar, dnsChar *C.char, mtu C.int) *C.char {
++	if err := handleStartTun(callback, int(fd), takeCString(deviceChar), takeCString(stackChar), takeCString(addressChar), takeCString(dnsChar), int(mtu)); err != nil {
++		return C.CString(err.Error())
++	}
+ 	if !isRunning.Load() {
+ 		handleStartListener()
+ 	} else {
+ 		handleResetConnections()
+ 	}
++	return C.CString("")
+ }
+ 
+ //export quickSetup
+@@ -329,5 +346,5 @@ func updateDns(s *C.char) {
+ //
+ //export bridgeABI
+ func bridgeABI() C.int {
+-	return 3
++	return 5
+ }
+diff --git a/src/main/kotlin/io/github/oviron/libmihomo/Clash.kt b/src/main/kotlin/io/github/oviron/libmihomo/Clash.kt
+index 755da8a..9cabed5 100644
+--- a/src/main/kotlin/io/github/oviron/libmihomo/Clash.kt
++++ b/src/main/kotlin/io/github/oviron/libmihomo/Clash.kt
+@@ -4,7 +4,7 @@ import java.io.File
+ 
+ /** Native bridge to embedded mihomo; see README for lifecycle + threading. */
+ object Clash {
+-    const val EXPECTED_BRIDGE_ABI: Int = 3
++    const val EXPECTED_BRIDGE_ABI: Int = 5
+ 
+     @Volatile
+     private var initFailure: Throwable? = null
+@@ -16,8 +16,15 @@ object Clash {
+     fun load(nativeLibDir: String) {
+         if (loaded) return
+         initFailure = try {
+-            System.load(resolveLib(nativeLibDir, "libclash.so"))
+-            System.load(resolveLib(nativeLibDir, "libmihomo-jni.so"))
++            val clashFile = File(nativeLibDir, "libclash.so")
++            val jniFile = File(nativeLibDir, "libmihomo-jni.so")
++            if (clashFile.isFile && jniFile.isFile) {
++                System.load(clashFile.absolutePath)
++                System.load(jniFile.absolutePath)
++            } else {
++                System.loadLibrary("clash")
++                System.loadLibrary("mihomo-jni")
++            }
+             val abi = nativeBridgeABI()
+             if (abi != EXPECTED_BRIDGE_ABI) {
+                 throw IllegalStateException(
+@@ -82,16 +89,16 @@ object Clash {
+         address: String,
+         dns: String,
+         mtu: Int,
+-    ) {
++    ): String {
+         assertReady()
+-        nativeStartTUN(fd, cb, device, stack, address, dns, mtu)
++        return nativeStartTUN(fd, cb, device, stack, address, dns, mtu)
+     }
+ 
+     // 8 params mirror the native ABI plus the cb split into protect/resolverProcess.
+     @Suppress("LongParameterList")
+     fun startTUN(
+         fd: Int,
+-        protect: (Int) -> Unit,
++        protect: (Int) -> Boolean,
+         resolverProcess: (protocol: Int, source: String, target: String, uid: Int) -> String,
+         device: String,
+         stack: String,
+@@ -144,7 +151,7 @@ object Clash {
+         }
+ 
+     private fun lambdaTun(
+-        protect: (Int) -> Unit,
++        protect: (Int) -> Boolean,
+         resolverProcess: (Int, String, String, Int) -> String,
+     ) = object : TunInterface {
+         override fun protect(fd: Int) = protect.invoke(fd)
+@@ -175,7 +182,7 @@ object Clash {
+         address: String,
+         dns: String,
+         mtu: Int,
+-    )
++    ): String
+ 
+     @JvmStatic
+     private external fun nativeStopTun()
+diff --git a/src/main/kotlin/io/github/oviron/libmihomo/TunInterface.kt b/src/main/kotlin/io/github/oviron/libmihomo/TunInterface.kt
+index ae81fb4..35aa6fb 100644
+--- a/src/main/kotlin/io/github/oviron/libmihomo/TunInterface.kt
++++ b/src/main/kotlin/io/github/oviron/libmihomo/TunInterface.kt
+@@ -1,7 +1,7 @@
+ package io.github.oviron.libmihomo
+ 
+ interface TunInterface {
+-    fun protect(fd: Int)
++    fun protect(fd: Int): Boolean
+ 
+     fun resolverProcess(
+         protocol: Int,

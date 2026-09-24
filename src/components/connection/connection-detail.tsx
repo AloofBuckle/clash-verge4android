@@ -12,7 +12,13 @@ export interface ConnectionDetailRef {
   close: () => void
 }
 
-export function ConnectionDetail({ ref }: { ref?: Ref<ConnectionDetailRef> }) {
+export function ConnectionDetail({
+  ref,
+  onCloseConnection,
+}: {
+  ref?: Ref<ConnectionDetailRef>
+  onCloseConnection?: (id: string) => void | Promise<void>
+}) {
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState<IConnectionsItem | null>(null)
   const [closed, setClosed] = useState(false)
@@ -54,6 +60,7 @@ export function ConnectionDetail({ ref }: { ref?: Ref<ConnectionDetailRef> }) {
             data={detail}
             closed={closed}
             onClose={onClose}
+            onCloseConnection={onCloseConnection}
           />
         ) : null
       }
@@ -65,9 +72,15 @@ interface InnerProps {
   data: IConnectionsItem
   closed: boolean
   onClose?: () => void
+  onCloseConnection?: (id: string) => void | Promise<void>
 }
 
-const InnerConnectionDetail = ({ data, closed, onClose }: InnerProps) => {
+const InnerConnectionDetail = ({
+  data,
+  closed,
+  onClose,
+  onCloseConnection,
+}: InnerProps) => {
   const { t } = useTranslation()
   const { metadata, rulePayload } = data
   const theme = useTheme()
@@ -129,7 +142,10 @@ const InnerConnectionDetail = ({ data, closed, onClose }: InnerProps) => {
     },
   ]
 
-  const onDelete = useLockFn(async () => closeConnection(data.id))
+  const onDelete = useLockFn(async () => {
+    if (onCloseConnection) await onCloseConnection(data.id)
+    else await closeConnection(data.id)
+  })
 
   return (
     <Box sx={{ userSelect: 'text', color: theme.palette.text.secondary }}>

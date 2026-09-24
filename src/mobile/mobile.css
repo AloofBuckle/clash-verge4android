@@ -1,0 +1,85 @@
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  background-color: var(--scroller-color);
+}
+
+.mobile-verge-shell {
+  width: 100%;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--background-color);
+}
+
+.mobile-verge-page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mobile-verge-header {
+  flex: 0 0 calc(58px + env(safe-area-inset-top));
+  min-height: calc(58px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) 20px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--divider-color);
+  background: var(--background-color);
+}
+
+.mobile-verge-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--mobile-content-bg);
+  padding: 10px 0;
+}
+
+.mobile-verge-content {
+  width: calc(100% - 20px);
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.verge-setting-panel {
+  border-radius: 8px;
+  background: var(--verge-panel-bg);
+  overflow: hidden;
+}
+
+@media (min-width: 650px) {
+  .mobile-verge-content {
+    width: calc(100% - 28px);
+  }
+}

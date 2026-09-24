@@ -2,19 +2,29 @@
   "identifier": "migrated",
   "description": "permissions that were migrated from v1",
   "local": true,
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "fs:allow-read-file",
     "fs:allow-exists",
     {
       "identifier": "fs:scope",
-      "allow": ["$APPDATA/**", "$RESOURCE/../**", "**"]
+      "allow": [
+        "$APPDATA/**",
+        "$RESOURCE/../**",
+        "**"
+      ]
     },
     "fs:allow-write-file",
     {
       "identifier": "fs:scope",
-      "allow": ["$APPDATA/**", "$RESOURCE/../**", "**"]
+      "allow": [
+        "$APPDATA/**",
+        "$RESOURCE/../**",
+        "**"
+      ]
     },
     "fs:allow-app-read",
     "fs:allow-app-read-recursive",
@@ -65,7 +75,14 @@
     "core:webview:allow-print",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "http://*" }, { "url": "https://*" }]
+      "allow": [
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "https://*"
+        }
+      ]
     },
     "dialog:allow-open",
     "global-shortcut:allow-is-registered",
@@ -77,5 +94,10 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "dialog:default"
+  ],
+  "platforms": [
+    "macOS",
+    "windows",
+    "linux"
   ]
 }
