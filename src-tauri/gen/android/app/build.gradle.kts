@@ -54,6 +54,13 @@ android {
         getByName("release") {
             if (signingProperties.isNotEmpty()) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
+            packaging {
+                // Keep a single universal APK while allowing Android to compress
+                // the large native libraries inside the APK. They are extracted
+                // to nativeLibraryDir at install time instead of being stored
+                // uncompressed for direct mmap from the APK.
+                jniLibs.useLegacyPackaging = true
+            }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

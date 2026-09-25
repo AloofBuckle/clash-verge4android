@@ -48,9 +48,9 @@ const KSU_UNINSTALL: &str = include_str!(concat!(
 ));
 
 #[cfg(target_arch = "aarch64")]
-const ROOT_AGENT_BYTES: &[u8] = include_bytes!(concat!(
+const ROOT_AGENT_GZ_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../.local-artifacts/runtime/cv4a-root-agent-arm64"
+    "/../.local-artifacts/runtime/cv4a-root-agent-arm64.gz"
 ));
 #[cfg(target_arch = "aarch64")]
 const MIHOMO_GZ_BYTES: &[u8] = include_bytes!(concat!(
@@ -58,16 +58,16 @@ const MIHOMO_GZ_BYTES: &[u8] = include_bytes!(concat!(
     "/../.local-artifacts/runtime/mihomo-android-v1.19.31.gz"
 ));
 #[cfg(target_arch = "aarch64")]
-const GEOSITE_BYTES: &[u8] = include_bytes!(concat!(
+const GEOSITE_GZ_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../.local-artifacts/runtime/geosite.dat"
+    "/../.local-artifacts/runtime/geosite.dat.gz"
 ));
 #[cfg(not(target_arch = "aarch64"))]
-const ROOT_AGENT_BYTES: &[u8] = &[];
+const ROOT_AGENT_GZ_BYTES: &[u8] = &[];
 #[cfg(not(target_arch = "aarch64"))]
 const MIHOMO_GZ_BYTES: &[u8] = &[];
 #[cfg(not(target_arch = "aarch64"))]
-const GEOSITE_BYTES: &[u8] = &[];
+const GEOSITE_GZ_BYTES: &[u8] = &[];
 
 struct MobileState {
     store: Mutex<Store>,
@@ -1306,6 +1306,19 @@ fn write_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
     Ok(())
 }
 
+fn write_gzip_mode(path: &Path, package: &[u8], mode: u32) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let mut decoder = GzDecoder::new(package);
+    let mut output = fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    std::io::copy(&mut decoder, &mut output).map_err(|e| format!("decompress {}: {e}", path.display()))?;
+    output.sync_all().map_err(|e| format!("sync {}: {e}", path.display()))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+    Ok(())
+}
+
 fn selinux_context(path: &Path) -> Option<String> {
     let path_c = CString::new(path.as_os_str().as_bytes()).ok()?;
     let name = c"security.selinux";
@@ -1337,21 +1350,17 @@ fn probe_socket_context(run_dir: &Path) -> Option<String> {
 }
 
 fn stage_runtime(app_data_dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
-    if ROOT_AGENT_BYTES.is_empty() || MIHOMO_GZ_BYTES.is_empty() || GEOSITE_BYTES.is_empty() {
+    if ROOT_AGENT_GZ_BYTES.is_empty() || MIHOMO_GZ_BYTES.is_empty() || GEOSITE_GZ_BYTES.is_empty() {
         return Err("Root runtime is currently packaged only for arm64-v8a".into());
     }
     let stage = app_data_dir.join("runtime-stage");
     fs::create_dir_all(&stage).map_err(|e| format!("create runtime stage: {e}"))?;
     let agent = stage.join("cv4a-root-agent");
-    write_mode(&agent, ROOT_AGENT_BYTES, 0o700)?;
+    write_gzip_mode(&agent, ROOT_AGENT_GZ_BYTES, 0o700)?;
     let core = stage.join("mihomo");
-    let mut decoder = GzDecoder::new(MIHOMO_GZ_BYTES);
-    let mut output = fs::File::create(&core).map_err(|e| format!("create staged mihomo: {e}"))?;
-    std::io::copy(&mut decoder, &mut output).map_err(|e| format!("decompress mihomo: {e}"))?;
-    output.sync_all().map_err(|e| format!("sync staged mihomo: {e}"))?;
-    fs::set_permissions(&core, fs::Permissions::from_mode(0o700)).map_err(|e| format!("chmod staged mihomo: {e}"))?;
+    write_gzip_mode(&core, MIHOMO_GZ_BYTES, 0o700)?;
     let geosite = stage.join("GeoSite.dat");
-    write_mode(&geosite, GEOSITE_BYTES, 0o600)?;
+    write_gzip_mode(&geosite, GEOSITE_GZ_BYTES, 0o600)?;
     Ok((agent, core, geosite))
 }
 
@@ -1417,7 +1426,7 @@ async fn runtime_status(state: &MobileState) -> RuntimeStatus {
     let core_connected = core_running && core_connected(&state.controller_socket).await;
     let transparent_active = status.as_ref().is_some_and(|value| value.transparent_active);
     RuntimeStatus {
-        packaged: !ROOT_AGENT_BYTES.is_empty() && !MIHOMO_GZ_BYTES.is_empty() && !GEOSITE_BYTES.is_empty(),
+        packaged: !ROOT_AGENT_GZ_BYTES.is_empty() && !MIHOMO_GZ_BYTES.is_empty() && !GEOSITE_GZ_BYTES.is_empty(),
         agent_connected,
         core_running,
         core_connected,
@@ -3120,8 +3129,8 @@ async fn mobile_set_system_proxy(
         .map_err(|e| format!("chmod Android VPN runtime directory: {e}"))?;
     let config_path = vpn_dir.join("config.yaml");
     write_mode(&config_path, yaml.as_bytes(), 0o600)?;
-    if !GEOSITE_BYTES.is_empty() {
-        write_mode(&vpn_dir.join("GeoSite.dat"), GEOSITE_BYTES, 0o600)?;
+    if !GEOSITE_GZ_BYTES.is_empty() {
+        write_gzip_mode(&vpn_dir.join("GeoSite.dat"), GEOSITE_GZ_BYTES, 0o600)?;
     }
 
     let stack = match overrides.tun_stack.as_deref().unwrap_or("mixed") {

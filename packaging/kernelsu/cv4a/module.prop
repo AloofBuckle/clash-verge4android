@@ -1,6 +1,6 @@
 id=cv4a
 name=Clash Verge for Android Runtime
-version=0.1.0-alpha.1
-versionCode=1001
+version=0.1.0-alpha.2
+versionCode=1002
 author=AloofBuckle
 description=Starts the Clash Verge for Android root runtime and restores its Mihomo TUN at boot.

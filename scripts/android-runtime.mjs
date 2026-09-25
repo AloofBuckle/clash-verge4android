@@ -5,9 +5,11 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { gzipSync } from 'node:zlib'
 
 const version = 'v1.19.31'
 const archiveName = `mihomo-android-arm64-v8-${version}.gz`
@@ -19,6 +21,8 @@ const runtimeDir = path.resolve('.local-artifacts/runtime')
 const archive = path.join(runtimeDir, `mihomo-android-${version}.gz`)
 const geosite = path.join(runtimeDir, 'geosite.dat')
 const agent = path.join(runtimeDir, 'cv4a-root-agent-arm64')
+const geositeGz = path.join(runtimeDir, 'geosite.dat.gz')
+const agentGz = path.join(runtimeDir, 'cv4a-root-agent-arm64.gz')
 
 function run(command, args, env = process.env) {
   const result = spawnSync(command, args, { stdio: 'inherit', env })
@@ -94,9 +98,15 @@ function buildAgent(ndk) {
   )
 }
 
+function compressRuntimeAssets() {
+  writeFileSync(agentGz, gzipSync(readFileSync(agent), { level: 9 }))
+  writeFileSync(geositeGz, gzipSync(readFileSync(geosite), { level: 9 }))
+}
+
 export function prepareAndroidRuntime({ ndk }) {
   ensureMihomo()
   ensureGeosite()
   buildAgent(ndk)
+  compressRuntimeAssets()
 }
 

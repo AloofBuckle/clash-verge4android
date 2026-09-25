@@ -3634,7 +3634,7 @@ function App() {
                     <Box className="verge-setting-panel">
                       <SettingList title={zhSettings.components.verge.advanced.title}>
                         <SettingItem label={zhSettings.components.verge.advanced.fields.vergeVersion}>
-                          <Typography variant="body2">0.1.0-alpha.1</Typography>
+                          <Typography variant="body2">0.1.0-alpha.2</Typography>
                         </SettingItem>
                         <SettingItem
                           label={zhSettings.components.verge.advanced.fields.exportDiagnostics}
