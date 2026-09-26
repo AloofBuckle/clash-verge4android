@@ -1,6 +1,6 @@
 use clash_verge_mobile::{
     Document, Profile, RuntimeEnhancements, RuntimeOverrides, Store, runtime_config_tun_enabled,
-    runtime_config_with_interface, runtime_preview_config_with_enhancements, runtime_tun_config_with_enhancements,
+    runtime_preview_config_with_enhancements, runtime_tun_config_with_enhancements,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -30,6 +30,8 @@ const MAX_PROFILE_BYTES: usize = 4 * 1024 * 1024;
 const MOBILE_BACKUP_FORMAT_VERSION: u32 = 1;
 const MAX_MOBILE_BACKUP_BYTES: usize = 16 * 1024 * 1024;
 const AUTO_BACKUP_KEEP: usize = 20;
+const CORE_BYPASS_PREF: &str = "8899";
+const CORE_BYPASS_MARK: &str = "0x20000000/0x20000000";
 
 fn unix_time() -> u64 {
     SystemTime::now()
@@ -125,6 +127,9 @@ enum Request {
     StartCore,
     StopCore,
     RestartCore,
+    SetTransparent {
+        enable: bool,
+    },
     SetVpnCoexistence {
         enable: bool,
     },
@@ -296,7 +301,12 @@ impl Runtime {
             if ipv6 {
                 command.arg("-6");
             }
-            let Ok(status) = command.args(["rule", "del", "pref", pref]).status() else {
+            let Ok(status) = command
+                .args(["rule", "del", "pref", pref])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+            else {
                 break;
             };
             if !status.success() {
@@ -314,6 +324,72 @@ impl Runtime {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("ip rule failed: {}", stderr.trim()));
+        }
+        Ok(())
+    }
+
+    fn android_netd_rule_priority(&self) -> Result<String, String> {
+        let output = Command::new("ip")
+            .args(["rule", "show"])
+            .output()
+            .map_err(|e| format!("read Android policy rules: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "read Android policy rules: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let rules = String::from_utf8_lossy(&output.stdout);
+        rules
+            .lines()
+            .find_map(|line| {
+                if !line.contains("lookup legacy_system") {
+                    return None;
+                }
+                let (priority, _) = line.split_once(':')?;
+                priority.trim().parse::<u32>().ok().filter(|value| *value > 8910)
+            })
+            .map(|priority| priority.to_string())
+            .ok_or_else(|| "Android netd policy entry was not found".into())
+    }
+
+    fn clear_core_bypass_rules(&self) {
+        for ipv6 in [false, true] {
+            self.remove_rule_pref(ipv6, CORE_BYPASS_PREF);
+        }
+    }
+
+    fn install_core_bypass_rules(&self) -> Result<(), String> {
+        self.clear_core_bypass_rules();
+        let target = self.android_netd_rule_priority()?;
+        self.add_rule(
+            false,
+            &[
+                "rule",
+                "add",
+                "pref",
+                CORE_BYPASS_PREF,
+                "fwmark",
+                CORE_BYPASS_MARK,
+                "goto",
+                &target,
+            ],
+        )?;
+        if let Err(error) = self.add_rule(
+            true,
+            &[
+                "rule",
+                "add",
+                "pref",
+                CORE_BYPASS_PREF,
+                "fwmark",
+                CORE_BYPASS_MARK,
+                "goto",
+                &target,
+            ],
+        ) {
+            self.clear_core_bypass_rules();
+            return Err(error);
         }
         Ok(())
     }
@@ -348,12 +424,13 @@ impl Runtime {
         if !Path::new("/sys/class/net/Mihomo").exists() || !Path::new("/sys/class/net/tun0").exists() {
             return Ok(());
         }
-        self.add_rule(false, &["rule", "add", "pref", "8888", "iif", "tun0", "goto", "10000"])?;
-        self.add_rule(false, &["rule", "add", "pref", "8889", "iif", "lo", "goto", "10000"])?;
+        let target = self.android_netd_rule_priority()?;
+        self.add_rule(false, &["rule", "add", "pref", "8888", "iif", "tun0", "goto", &target])?;
+        self.add_rule(false, &["rule", "add", "pref", "8889", "iif", "lo", "goto", &target])?;
         if self.tun0_has_ipv6() {
             if let Err(error) = self
-                .add_rule(true, &["rule", "add", "pref", "8888", "iif", "tun0", "goto", "10000"])
-                .and_then(|_| self.add_rule(true, &["rule", "add", "pref", "8889", "iif", "lo", "goto", "10000"]))
+                .add_rule(true, &["rule", "add", "pref", "8888", "iif", "tun0", "goto", &target])
+                .and_then(|_| self.add_rule(true, &["rule", "add", "pref", "8889", "iif", "lo", "goto", &target]))
             {
                 self.remove_rule_pref(false, "8888");
                 self.remove_rule_pref(false, "8889");
@@ -373,25 +450,6 @@ impl Runtime {
             let _ = fs::remove_file(self.coexistence_marker());
         }
         self.reconcile_vpn_coexistence()
-    }
-
-    fn vpn_coexistence_loop(self) {
-        let mut previous = None;
-        loop {
-            let current = (
-                self.coexistence_desired(),
-                Path::new("/sys/class/net/Mihomo").exists(),
-                Path::new("/sys/class/net/tun0").exists(),
-                self.tun0_has_ipv6(),
-            );
-            if previous != Some(current) {
-                if let Err(error) = self.reconcile_vpn_coexistence() {
-                    eprintln!("VPN coexistence reconcile failed: {error}");
-                }
-                previous = Some(current);
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
     }
 
     fn status(&self) -> Status {
@@ -554,6 +612,13 @@ impl Runtime {
     fn start_core(&self) -> Result<(), String> {
         self.prepare()?;
         if self.core_pid().is_some() {
+            let source =
+                fs::read_to_string(self.config()).map_err(|e| format!("read {}: {e}", self.config().display()))?;
+            if runtime_config_tun_enabled(&source) {
+                self.install_core_bypass_rules()?;
+            } else {
+                self.clear_core_bypass_rules();
+            }
             return Ok(());
         }
         if !self.bin().is_file() {
@@ -581,17 +646,23 @@ impl Runtime {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(err))
             .spawn()
-            .map_err(|e| format!("start mihomo: {e}"))?;
+            .map_err(|e| {
+                self.clear_core_bypass_rules();
+                format!("start mihomo: {e}")
+            })?;
         let pid = i32::try_from(child.id()).map_err(|_| "mihomo PID does not fit i32")?;
         write_private(&self.pid_file(), format!("{pid}\n").as_bytes())?;
         let pid_file = self.pid_file();
+        let cleanup = self.clone();
         thread::spawn(move || {
             let _ = child.wait();
             let _ = fs::remove_file(pid_file);
+            cleanup.clear_core_bypass_rules();
         });
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             if !process_alive(pid) {
+                self.clear_core_bypass_rules();
                 let _ = fs::remove_file(self.pid_file());
                 return Err("mihomo exited during startup; inspect logs/mihomo.log".into());
             }
@@ -624,37 +695,10 @@ impl Runtime {
         if process_alive(pid) {
             Ok(())
         } else {
+            self.clear_core_bypass_rules();
             let _ = fs::remove_file(self.pid_file());
             Err("mihomo failed to stay running".into())
         }
-    }
-
-    fn protected_default_interface(&self) -> Result<String, String> {
-        let output = Command::new("/system/bin/ip")
-            .args(["route", "get", "1.1.1.1", "mark", "0x20000", "uid", "0"])
-            .output()
-            .map_err(|e| format!("query protected Android route: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "query protected Android route failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut fields = text.split_whitespace();
-        while let Some(field) = fields.next() {
-            if field == "dev"
-                && let Some(interface) = fields.next()
-            {
-                if matches!(interface, "lo" | "Mihomo") || interface.starts_with("tun") {
-                    return Err(format!(
-                        "protected Android route resolved to virtual interface {interface}"
-                    ));
-                }
-                return Ok(interface.to_owned());
-            }
-        }
-        Err(format!("protected Android route has no interface: {}", text.trim()))
     }
 
     fn launch_config(&self) -> PathBuf {
@@ -664,14 +708,13 @@ impl Runtime {
     fn prepare_launch_config(&self) -> Result<PathBuf, String> {
         let source = fs::read_to_string(self.config()).map_err(|e| format!("read {}: {e}", self.config().display()))?;
         if !runtime_config_tun_enabled(&source) {
+            self.clear_core_bypass_rules();
             let _ = fs::remove_file(self.launch_config());
             return Ok(self.config());
         }
-        let interface = self.protected_default_interface()?;
-        let rendered = runtime_config_with_interface(&source, &interface)?;
-        let launch = self.launch_config();
-        write_private(&launch, rendered.as_bytes())?;
-        Ok(launch)
+        self.install_core_bypass_rules()?;
+        let _ = fs::remove_file(self.launch_config());
+        Ok(self.config())
     }
 
     fn persisted_selections(&self) -> Result<Vec<clash_verge_mobile::SelectedProxy>, String> {
@@ -1079,6 +1122,38 @@ impl Runtime {
             .unwrap_or_default()
     }
 
+    fn set_transparent(&self, enable: bool) -> Result<(), String> {
+        let profiles_path = self.profiles_path.as_ref().ok_or("profiles path is not configured")?;
+        let document = Store::open(profiles_path.clone())?.document();
+        let active_id = document.active_id.as_ref().ok_or("no active profile")?;
+        let active = document
+            .profiles
+            .iter()
+            .find(|profile| &profile.id == active_id)
+            .ok_or("active profile is missing")?;
+        let rendered = render_profile_runtime(&document, active, &self.load_runtime_overrides(), enable)?;
+        let previous_runtime = fs::read_to_string(self.config()).ok();
+        let was_running = self.core_pid().is_some();
+
+        self.apply_config(&rendered)?;
+        let apply_result = (|| {
+            if was_running {
+                self.stop_core()?;
+            }
+            self.start_core()
+        })();
+        if let Err(error) = apply_result {
+            if let Some(previous_runtime) = previous_runtime {
+                let _ = self.apply_config(&previous_runtime);
+                if was_running {
+                    let _ = self.start_core();
+                }
+            }
+            return Err(format!("switch transparent mode: {error}"));
+        }
+        Ok(())
+    }
+
     fn refresh_profile(&self, id: &str) -> Result<(), String> {
         let path = self.profiles_path.as_ref().ok_or("profiles path is not configured")?;
         let initial = Store::open(path.clone())?;
@@ -1197,6 +1272,7 @@ impl Runtime {
     fn stop_core(&self) -> Result<(), String> {
         self.clear_vpn_coexistence_rules();
         let Some(pid) = self.core_pid() else {
+            self.clear_core_bypass_rules();
             let _ = fs::remove_file(&self.controller_socket);
             let _ = fs::remove_file(self.launch_config());
             return Ok(());
@@ -1207,6 +1283,7 @@ impl Runtime {
         let deadline = Instant::now() + Duration::from_secs(4);
         while Instant::now() < deadline {
             if !process_alive(pid) {
+                self.clear_core_bypass_rules();
                 let _ = fs::remove_file(self.pid_file());
                 let _ = fs::remove_file(&self.controller_socket);
                 let _ = fs::remove_file(self.launch_config());
@@ -1395,6 +1472,7 @@ fn handle(stream: UnixStream, runtime: &Runtime, expected_uid: u32) -> Result<bo
             runtime.stop_core().and_then(|_| runtime.start_core()).map(|_| None),
             false,
         ),
+        Request::SetTransparent { enable } => (runtime.set_transparent(enable).map(|_| None), false),
         Request::SetVpnCoexistence { enable } => (runtime.set_vpn_coexistence(enable).map(|_| None), false),
         Request::ReadLog { lines } => (runtime.read_log(lines).map(Some), false),
         Request::ClearLog => (runtime.clear_log().map(|_| None), false),
@@ -1538,8 +1616,6 @@ fn run() -> Result<(), String> {
         let backup = runtime.clone();
         thread::spawn(move || backup.auto_backup_loop());
     }
-    let coexistence = runtime.clone();
-    thread::spawn(move || coexistence.vpn_coexistence_loop());
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => match handle(stream, &runtime, expected_uid) {

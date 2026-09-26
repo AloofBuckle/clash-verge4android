@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { ProxyProviderButtonView } from '@/components/proxy/provider-button-view'
 import { RuleProviderButtonView } from '@/components/rule/provider-button-view'
-import zhProxies from '@/locales/zh/proxies.json'
-import zhRules from '@/locales/zh/rules.json'
 
 import {
   api,
@@ -20,6 +19,7 @@ export function MobileProxyProviderButton({
   enabled: boolean
   onFeedback: Feedback
 }) {
+  const { t } = useTranslation()
   const [providers, setProviders] = useState<ProxyProviderSummary[]>([])
   const [unavailable, setUnavailable] = useState(false)
   const [updating, setUpdating] = useState<Record<string, boolean>>({})
@@ -51,12 +51,7 @@ export function MobileProxyProviderButton({
     try {
       setProviders(await api.updateProxyProvider(name))
       setUnavailable(false)
-      onFeedback(
-        zhProxies.feedback.notifications.provider.updateSuccess.replace(
-          '{{name}}',
-          name,
-        ),
-      )
+      onFeedback(t('proxies.feedback.notifications.provider.updateSuccess', { name }))
     } catch (error) {
       onFeedback(String(error), true)
     } finally {
@@ -75,7 +70,7 @@ export function MobileProxyProviderButton({
       }
       setProviders(latest)
       setUnavailable(false)
-      onFeedback(zhProxies.feedback.notifications.provider.allUpdated)
+      onFeedback(t('proxies.feedback.notifications.provider.allUpdated'))
     } catch (error) {
       onFeedback(String(error), true)
     } finally {
@@ -101,6 +96,7 @@ export function MobileRuleProviderButton({
   enabled: boolean
   onFeedback: Feedback
 }) {
+  const { t } = useTranslation()
   const [providers, setProviders] = useState<RuleProviderSummary[]>([])
   const [updating, setUpdating] = useState<Record<string, boolean>>({})
 
@@ -123,12 +119,7 @@ export function MobileRuleProviderButton({
     setUpdating((old) => ({ ...old, [name]: true }))
     try {
       setProviders(await api.updateRuleProvider(name))
-      onFeedback(
-        zhRules.feedback.notifications.provider.updateSuccess.replace(
-          '{{name}}',
-          name,
-        ),
-      )
+      onFeedback(t('rules.feedback.notifications.provider.updateSuccess', { name }))
     } catch (error) {
       onFeedback(String(error), true)
     } finally {
@@ -146,7 +137,7 @@ export function MobileRuleProviderButton({
         setUpdating((old) => ({ ...old, [name]: false }))
       }
       setProviders(latest)
-      onFeedback(zhRules.feedback.notifications.provider.allUpdated)
+      onFeedback(t('rules.feedback.notifications.provider.allUpdated'))
     } catch (error) {
       onFeedback(String(error), true)
     } finally {

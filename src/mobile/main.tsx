@@ -13,6 +13,7 @@ import {
   DeleteRounded,
   DeveloperBoardOutlined,
   DnsOutlined,
+  DragIndicatorRounded,
   ForkRightOutlined,
   HomeOutlined,
   IndeterminateCheckBoxRounded,
@@ -47,6 +48,7 @@ import {
   Button,
   ButtonGroup,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -59,6 +61,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  LinearProgress,
   Menu,
   MenuItem,
   Paper,
@@ -67,9 +70,18 @@ import {
   Tooltip,
   Typography,
   alpha,
+  keyframes,
 } from '@mui/material'
+import {
+  DragDropProvider,
+  KeyboardSensor,
+  PointerSensor,
+  type DragEndEvent,
+} from '@dnd-kit/react'
+import { isSortable } from '@dnd-kit/react/sortable'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
+import { useTranslation } from 'react-i18next'
 import {
   type FormEvent,
   type ReactNode,
@@ -84,6 +96,7 @@ import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialo
 import { readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs'
 
 import { BaseSearchBox, type SearchState } from '@/components/base/base-search-box'
+import { SortableItem } from '@/components/base/sortable-item'
 import { BaseStyledSelect } from '@/components/base/base-styled-select'
 import { Switch } from '@/components/base/base-switch'
 import { NoticeManager } from '@/components/layout/notice-manager'
@@ -101,6 +114,7 @@ import { EnhancedCard } from '@/components/home/enhanced-card'
 import { PersistentSelect } from '@/components/home/current-proxy-select'
 import LogItem from '@/components/log/log-item'
 import { ProfileBox } from '@/components/profile/profile-box'
+import { QrViewer } from '@/components/profile/qr-viewer'
 import { ProxyChainCard } from '@/components/proxy/proxy-chain-card'
 import { ProxyItemView } from '@/components/proxy/proxy-item-view'
 import type { ProxyChainItem } from '@/components/proxy/proxy-chain-model'
@@ -109,22 +123,29 @@ import { SettingItem, SettingList } from '@/components/setting/mods/setting-comp
 import { StackModeSwitch } from '@/components/setting/mods/stack-mode-switch'
 import { ThemeModeSwitch } from '@/components/setting/mods/theme-mode-switch'
 import { NetworkInterfaceContent } from '@/components/setting/mods/network-interface-content'
-import { initializeLanguage } from '@/services/i18n'
+import {
+  changeLanguage,
+  getCachedLanguage,
+  initializeLanguage,
+  supportedLanguages,
+} from '@/services/i18n'
 import { showNotice } from '@/services/notice-service'
-import zhConnections from '@/locales/zh/connections.json'
-import zhHome from '@/locales/zh/home.json'
-import zhLayout from '@/locales/zh/layout.json'
-import zhLogs from '@/locales/zh/logs.json'
-import zhProfiles from '@/locales/zh/profiles.json'
-import zhProxies from '@/locales/zh/proxies.json'
-import zhRules from '@/locales/zh/rules.json'
-import zhSettings from '@/locales/zh/settings.json'
-import zhShared from '@/locales/zh/shared.json'
+import fallbackConnections from '@/locales/zh/connections.json'
+import fallbackHome from '@/locales/zh/home.json'
+import fallbackLayout from '@/locales/zh/layout.json'
+import fallbackLogs from '@/locales/zh/logs.json'
+import fallbackProfiles from '@/locales/zh/profiles.json'
+import fallbackProxies from '@/locales/zh/proxies.json'
+import fallbackRules from '@/locales/zh/rules.json'
+import fallbackSettings from '@/locales/zh/settings.json'
+import fallbackShared from '@/locales/zh/shared.json'
 
 import {
   api,
   hasBackend,
   unavailable,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
   type BootModuleStatus,
   type BackupSettings,
   type Capabilities,
@@ -148,6 +169,12 @@ import {
   type TunPreferences,
   type WebDavBackupInfo,
 } from './api'
+import { MobileDnsEditor } from './dns-editor'
+import {
+  MobileIpInfoCard,
+  MobileSystemInfoCard,
+  MobileTestCard,
+} from './home-extra-cards'
 import {
   MobileEmpty,
   MobileModeButtons,
@@ -164,6 +191,14 @@ import {
 import './mobile.css'
 
 dayjs.extend(relativeTime)
+
+const round = keyframes`
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+`
+const profilePointerSensor = PointerSensor.configure({
+  activationConstraints: () => undefined,
+})
 
 type Page =
   | 'home'
@@ -193,57 +228,12 @@ const initialSearchState: SearchState = {
   matchWholeWord: false,
   useRegularExpression: false,
 }
-const portFields = [
-  {
-    key: 'mixedPort' as const,
-    label: zhSettings.modals.clashPort.fields.mixed,
-    fallback: 7890,
-  },
-  {
-    key: 'httpPort' as const,
-    label: zhSettings.modals.clashPort.fields.http,
-    fallback: 7899,
-  },
-  {
-    key: 'socksPort' as const,
-    label: zhSettings.modals.clashPort.fields.socks,
-    fallback: 7898,
-  },
-  {
-    key: 'redirPort' as const,
-    label: zhSettings.modals.clashPort.fields.redir,
-    fallback: 7895,
-  },
-  {
-    key: 'tproxyPort' as const,
-    label: zhSettings.modals.clashPort.fields.tproxy,
-    fallback: 7896,
-  },
-]
 const defaultProfileScript = `// Define main function (script entry)
 
 function main(config, profileName) {
   return config;
 }
 `
-const labels: Record<Page, string> = {
-  home: zhHome.page.title,
-  proxies: zhProxies.page.title.default,
-  profiles: zhProfiles.page.title,
-  rules: zhRules.page.title,
-  connections: zhConnections.page.title,
-  logs: zhLogs.page.title,
-  settings: zhSettings.page.title,
-}
-const navLabels: Record<Page, string> = {
-  home: zhLayout.components.navigation.tabs.home,
-  proxies: zhLayout.components.navigation.tabs.proxies,
-  profiles: zhLayout.components.navigation.tabs.profiles,
-  connections: zhLayout.components.navigation.tabs.connections,
-  rules: zhLayout.components.navigation.tabs.rules,
-  logs: zhLayout.components.navigation.tabs.logs,
-  settings: zhLayout.components.navigation.tabs.settings,
-}
 const navPages: Page[] = [
   'home',
   'proxies',
@@ -272,12 +262,6 @@ function formatBytes(value: number) {
 function formatRate(value: number) {
   return `${formatBytes(value)}/s`
 }
-function proxyDelayLabel(value: number | null | undefined) {
-  if (value === -2) return zhHome.components.currentProxy.status.testing
-  if (typeof value !== 'number' || value <= 0) return '—'
-  if (value >= 10_000) return zhHome.components.currentProxy.status.timeout
-  return `${value} ms`
-}
 function proxyDelayColor(
   value: number | null | undefined,
 ): 'success' | 'warning' | 'error' | 'default' {
@@ -286,14 +270,6 @@ function proxyDelayColor(
   if (value >= 500) return 'error'
   if (value >= 300) return 'warning'
   return 'success'
-}
-function sourceLabel(source: string | null) {
-  if (!source) return zhProfiles.modals.profileForm.types.local
-  try {
-    return new URL(source).host
-  } catch {
-    return source
-  }
 }
 function parseLogLine(line: string): ILogItem {
   const time = line.match(/\btime="([^"]+)"/)?.[1]
@@ -361,6 +337,83 @@ function chainCandidateNames(
   return [...result]
 }
 function App() {
+  const { i18n } = useTranslation()
+  const localeBundle = (i18n.getResourceBundle(
+    i18n.resolvedLanguage ?? i18n.language,
+    'translation',
+  ) ?? {}) as Record<string, unknown>
+  const zhConnections =
+    (localeBundle.connections as typeof fallbackConnections) ?? fallbackConnections
+  const zhHome =
+    (localeBundle.home as typeof fallbackHome) ?? fallbackHome
+  const zhLayout =
+    (localeBundle.layout as typeof fallbackLayout) ?? fallbackLayout
+  const zhLogs =
+    (localeBundle.logs as typeof fallbackLogs) ?? fallbackLogs
+  const zhProfiles =
+    (localeBundle.profiles as typeof fallbackProfiles) ?? fallbackProfiles
+  const zhProxies =
+    (localeBundle.proxies as typeof fallbackProxies) ?? fallbackProxies
+  const zhRules =
+    (localeBundle.rules as typeof fallbackRules) ?? fallbackRules
+  const zhSettings =
+    (localeBundle.settings as typeof fallbackSettings) ?? fallbackSettings
+  const zhShared =
+    (localeBundle.shared as typeof fallbackShared) ?? fallbackShared
+  const labels: Record<Page, string> = {
+    home: zhHome.page.title,
+    proxies: zhProxies.page.title.default,
+    profiles: zhProfiles.page.title,
+    rules: zhRules.page.title,
+    connections: zhConnections.page.title,
+    logs: zhLogs.page.title,
+    settings: zhSettings.page.title,
+  }
+  const navLabels: Record<Page, string> = {
+    home: zhLayout.components.navigation.tabs.home,
+    proxies: zhLayout.components.navigation.tabs.proxies,
+    profiles: zhLayout.components.navigation.tabs.profiles,
+    connections: zhLayout.components.navigation.tabs.connections,
+    rules: zhLayout.components.navigation.tabs.rules,
+    logs: zhLayout.components.navigation.tabs.logs,
+    settings: zhLayout.components.navigation.tabs.settings,
+  }
+  const languageLabels: Record<string, string> = {
+    en: 'English',
+    ru: 'Русский',
+    zh: '简体中文',
+    fa: 'فارسی',
+    tt: 'Татар',
+    id: 'Bahasa Indonesia',
+    ar: 'العربية',
+    ko: '한국어',
+    tr: 'Türkçe',
+    de: 'Deutsch',
+    es: 'Español',
+    jp: '日本語',
+    zhtw: '繁體中文',
+  }
+  const portFields = [
+    { key: 'mixedPort' as const, label: zhSettings.modals.clashPort.fields.mixed, fallback: 7890 },
+    { key: 'httpPort' as const, label: zhSettings.modals.clashPort.fields.http, fallback: 7899 },
+    { key: 'socksPort' as const, label: zhSettings.modals.clashPort.fields.socks, fallback: 7898 },
+    { key: 'redirPort' as const, label: zhSettings.modals.clashPort.fields.redir, fallback: 7895 },
+    { key: 'tproxyPort' as const, label: zhSettings.modals.clashPort.fields.tproxy, fallback: 7896 },
+  ]
+  const proxyDelayLabel = (value: number | null | undefined) => {
+    if (value === -2) return zhHome.components.currentProxy.status.testing
+    if (typeof value !== 'number' || value <= 0) return '—'
+    if (value >= 10_000) return zhHome.components.currentProxy.status.timeout
+    return `${value} ms`
+  }
+  const sourceLabel = (source: string | null) => {
+    if (!source) return zhProfiles.modals.profileForm.types.local
+    try {
+      return new URL(source).host
+    } catch {
+      return source
+    }
+  }
   const [themeMode, setThemeMode] = useState<MobileThemeMode>(() => {
     const saved = window.localStorage.getItem('cv4a-theme-mode')
     return saved === 'light' || saved === 'dark' || saved === 'system'
@@ -376,6 +429,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState<Form | null>(null)
   const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
   const [content, setContent] = useState('')
   const [sourceUrl, setSourceUrl] = useState('')
   const [profileOption, setProfileOption] = useState<ProfileOptions>(
@@ -454,6 +508,8 @@ function App() {
   const [scriptTarget, setScriptTarget] = useState<ScriptTarget | null>(null)
   const [scriptDraft, setScriptDraft] = useState('')
   const [bootModule, setBootModule] = useState<BootModuleStatus | null>(null)
+  const [coreDialogOpen, setCoreDialogOpen] = useState(false)
+  const [coreChanging, setCoreChanging] = useState<'stable' | 'alpha' | null>(null)
   const [core, setCore] = useState<CoreSnapshot | null>(null)
   const [connections, setConnections] = useState<ConnectionsSnapshot | null>(null)
   const [closedConnections, setClosedConnections] = useState<CoreConnection[]>([])
@@ -469,6 +525,29 @@ function App() {
   const [selectedProfiles, setSelectedProfiles] = useState<Set<string>>(
     () => new Set(),
   )
+  const [profileRefreshing, setProfileRefreshing] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [activatingProfileId, setActivatingProfileId] = useState<string | null>(null)
+  const [profileDndRevision, setProfileDndRevision] = useState(0)
+  const [qrProfile, setQrProfile] = useState<Profile | null>(null)
+  const [appVersion, setAppVersion] = useState('0.1.0-alpha.2')
+  const [appUpdateInfo, setAppUpdateInfo] = useState<AppUpdateInfo | null>(null)
+  const [appUpdateDialogOpen, setAppUpdateDialogOpen] = useState(false)
+  const [appUpdating, setAppUpdating] = useState(false)
+  const [appUpdateProgress, setAppUpdateProgress] = useState<AppUpdateProgress>({
+    active: false,
+    downloaded: 0,
+    total: 0,
+  })
+  const [lastAppUpdateCheck, setLastAppUpdateCheck] = useState<number | null>(() => {
+    const value = Number.parseInt(
+      window.localStorage.getItem('last_check_update') ?? '',
+      10,
+    )
+    return Number.isFinite(value) ? value : null
+  })
+  const appUpdateCheckRunning = useRef(false)
   const totals = useRef<{ upload: number; download: number; at: number } | null>(null)
   const previousConnections = useRef<Map<string, CoreConnection>>(new Map())
   const connectionDetailRef = useRef<ConnectionDetailRef>(null)
@@ -585,6 +664,18 @@ function App() {
       .finally(() => setLoading(false))
   }, [record])
   useEffect(() => {
+    if (!mobilePreferences) return
+    if (mobilePreferences.themeMode !== themeMode) {
+      setThemeMode(mobilePreferences.themeMode)
+      window.localStorage.setItem('cv4a-theme-mode', mobilePreferences.themeMode)
+    }
+    if (mobilePreferences.language !== (i18n.resolvedLanguage ?? i18n.language)) {
+      void changeLanguage(mobilePreferences.language).catch((error) =>
+        console.warn('[mobile] language change failed', error),
+      )
+    }
+  }, [i18n.language, i18n.resolvedLanguage, mobilePreferences, themeMode])
+  useEffect(() => {
     setHomeProxySelect(null)
     if (!core) {
       setHomeProxyGroupName('')
@@ -654,6 +745,42 @@ function App() {
     else setCore(null)
     return status
   }, [])
+  useEffect(() => {
+    if (!hasBackend() || loading) return
+    let disposed = false
+    let stop: (() => void) | null = null
+    void api
+      .onNativeStateChanged(() => {
+        if (!disposed) void syncRuntime().catch(() => {})
+      })
+      .then((cleanup) => {
+        if (disposed) cleanup()
+        else stop = cleanup
+      })
+      .catch(() => {})
+    return () => {
+      disposed = true
+      stop?.()
+    }
+  }, [loading, syncRuntime])
+  useEffect(() => {
+    if (!hasBackend() || loading) return
+    const syncForegroundState = () => {
+      if (document.visibilityState === 'visible') {
+        void syncRuntime().catch(() => {})
+      }
+    }
+    window.addEventListener('focus', syncForegroundState)
+    window.addEventListener('cv4a-native-focus', syncForegroundState)
+    window.addEventListener('cv4a-native-state', syncForegroundState)
+    document.addEventListener('visibilitychange', syncForegroundState)
+    return () => {
+      window.removeEventListener('focus', syncForegroundState)
+      window.removeEventListener('cv4a-native-focus', syncForegroundState)
+      window.removeEventListener('cv4a-native-state', syncForegroundState)
+      document.removeEventListener('visibilitychange', syncForegroundState)
+    }
+  }, [loading, syncRuntime])
   const syncConnections = useCallback(async () => {
     const snapshot = await api.connections()
     const now = Date.now()
@@ -705,7 +832,7 @@ function App() {
       api.runtimePreferences(),
       api.preferences(),
       api.tunPreferences(),
-      api.dnsOverride(),
+      api.dnsOverride(active?.id),
       api.portSettings(),
       api.externalControllerSettings(),
     ]).then(
@@ -737,7 +864,7 @@ function App() {
           setExternalController(externalControllerResult.value)
       },
     )
-  }, [loading, page])
+  }, [active?.id, loading, page])
   useEffect(() => {
     if (!runtime?.coreConnected || !['home', 'connections'].includes(page)) {
       if (!runtime?.coreConnected) {
@@ -841,6 +968,7 @@ function App() {
           : next.profile.name
         : '',
     )
+    setDescription('profile' in next ? next.profile.description ?? '' : '')
     setContent(
       next.kind === 'copy' || next.kind === 'edit' ? next.profile.yaml : '',
     )
@@ -855,6 +983,7 @@ function App() {
   }
   const activateProfile = async (profile: Profile) => {
     if (!canEdit || profile.id === doc.activeId) return
+    setActivatingProfileId(profile.id)
     setBusy(true)
     try {
       setDoc(await api.activate(profile.id))
@@ -863,11 +992,13 @@ function App() {
     } catch (e) {
       record(String(e), true)
     } finally {
+      setActivatingProfileId(null)
       setBusy(false)
     }
   }
   const refreshProfile = async (profile: Profile) => {
     if (!canEdit || !profile.source) return
+    setProfileRefreshing((old) => new Set(old).add(profile.id))
     setBusy(true)
     try {
       setDoc(await api.refresh(profile.id))
@@ -875,6 +1006,11 @@ function App() {
     } catch (e) {
       record(String(e), true)
     } finally {
+      setProfileRefreshing((old) => {
+        const next = new Set(old)
+        next.delete(profile.id)
+        return next
+      })
       setBusy(false)
     }
   }
@@ -882,6 +1018,7 @@ function App() {
     if (!canEdit) return
     const targets = doc.profiles.filter((profile) => profile.source)
     if (targets.length === 0) return
+    setProfileRefreshing(new Set(targets.map((profile) => profile.id)))
     setBusy(true)
     const failures: string[] = []
     try {
@@ -890,6 +1027,12 @@ function App() {
           setDoc(await api.refresh(profile.id))
         } catch (error) {
           failures.push(`${profile.name}: ${String(error)}`)
+        } finally {
+          setProfileRefreshing((old) => {
+            const next = new Set(old)
+            next.delete(profile.id)
+            return next
+          })
         }
       }
       await syncRuntime().catch(() => {})
@@ -897,7 +1040,33 @@ function App() {
         record(failures.join('\n'), true)
       }
     } finally {
+      setProfileRefreshing(new Set())
       setBusy(false)
+    }
+  }
+
+  const onProfileDragEnd = async (event: DragEndEvent) => {
+    const { operation, canceled } = event
+    const { source, target } = operation
+    if (canceled || !target || !isSortable(source)) return
+    const { index: newIndex, initialIndex: oldIndex } = source.sortable
+    if (
+      oldIndex < 0 ||
+      newIndex < 0 ||
+      oldIndex >= doc.profiles.length ||
+      newIndex >= doc.profiles.length ||
+      oldIndex === newIndex
+    ) {
+      return
+    }
+    const activeId = doc.profiles[oldIndex]?.id
+    const overId = doc.profiles[newIndex]?.id
+    if (!activeId || !overId || activeId === overId) return
+    try {
+      setDoc(await api.reorderProfile(activeId, overId))
+    } catch (error) {
+      setProfileDndRevision((revision) => revision + 1)
+      showNotice.error(error)
     }
   }
   const openMergeEditor = (target: MergeTarget) => {
@@ -1032,6 +1201,7 @@ function App() {
             ? await api.updateProfile(
                 form.profile.id,
                 name.trim(),
+                description.trim() || null,
                 content,
                 form.profile.yaml,
                 form.profile.source ? sourceUrl.trim() : null,
@@ -1040,6 +1210,7 @@ function App() {
           : form.kind === 'subscription'
             ? await api.subscribe(
                 name.trim(),
+                description.trim() || null,
                 sourceUrl.trim(),
                 profileOption,
               )
@@ -1124,6 +1295,91 @@ function App() {
       setBusy(false)
     }
   }
+  const runAppUpdateCheck = useCallback(
+    async (manual: boolean) => {
+      if (appUpdateCheckRunning.current) return null
+      appUpdateCheckRunning.current = true
+      try {
+        const info = await api.checkAppUpdate()
+        const checkedAt = Date.now()
+        window.localStorage.setItem('last_check_update', checkedAt.toString())
+        setLastAppUpdateCheck(checkedAt)
+        setAppUpdateInfo(info)
+        if (info) {
+          setAppUpdateDialogOpen(true)
+          if (!manual) {
+            showNotice.info('shared.feedback.notifications.updateAvailable', 2000)
+          }
+        } else if (manual) {
+          showNotice.success(
+            'settings.components.verge.advanced.notifications.latestVersion',
+          )
+        }
+        return info
+      } catch (error) {
+        if (manual) showNotice.warning(error)
+        else console.warn('[mobile] app update check failed', error)
+        return null
+      } finally {
+        appUpdateCheckRunning.current = false
+      }
+    },
+    [],
+  )
+  const checkAppUpdateManual = async () => {
+    await runAppUpdateCheck(true)
+  }
+  const installAppUpdate = async () => {
+    if (!appUpdateInfo || appUpdating) return
+    setAppUpdating(true)
+    setAppUpdateProgress({
+      active: true,
+      downloaded: 0,
+      total: appUpdateInfo.assetSize,
+    })
+    const poll = window.setInterval(() => {
+      void api.appUpdateProgress().then(setAppUpdateProgress).catch(() => {})
+    }, 250)
+    try {
+      await api.downloadAppUpdate(
+        appUpdateInfo.assetUrl,
+        appUpdateInfo.assetSize,
+      )
+      setAppUpdateProgress({
+        active: false,
+        downloaded: appUpdateInfo.assetSize,
+        total: appUpdateInfo.assetSize,
+      })
+      await api.installAppUpdate()
+    } catch (error) {
+      showNotice.error(error)
+    } finally {
+      window.clearInterval(poll)
+      setAppUpdating(false)
+    }
+  }
+  useEffect(() => {
+    if (!hasBackend()) return
+    void api.appVersion().then(setAppVersion).catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (!mobilePreferences?.autoCheckUpdate) return
+    const last = Number.parseInt(
+      window.localStorage.getItem('last_check_update') ?? '',
+      10,
+    )
+    const age = Number.isFinite(last) ? Date.now() - last : Number.POSITIVE_INFINITY
+    const firstDelay = age < 60 * 60 * 1000 ? 60 * 60 * 1000 - age : 5000
+    const first = window.setTimeout(() => void runAppUpdateCheck(false), firstDelay)
+    const interval = window.setInterval(
+      () => void runAppUpdateCheck(false),
+      24 * 60 * 60 * 1000,
+    )
+    return () => {
+      window.clearTimeout(first)
+      window.clearInterval(interval)
+    }
+  }, [mobilePreferences?.autoCheckUpdate, runAppUpdateCheck])
   const runMihomoMaintenance = async (
     operation: () => Promise<void>,
     successKey?: string,
@@ -1259,6 +1515,26 @@ function App() {
       setBusy(false)
     }
   }
+  const changeCoreVariant = async (variant: 'stable' | 'alpha') => {
+    if (busy || !runtime?.agentConnected || coreChanging) return
+    if ((mobilePreferences?.coreVariant ?? 'stable') === variant) return
+    setCoreChanging(variant)
+    setBusy(true)
+    try {
+      const status = await api.setCoreVariant(variant)
+      setMobilePreferences((old) =>
+        old ? { ...old, coreVariant: status.variant as 'stable' | 'alpha' } : old,
+      )
+      await syncRuntime().catch(() => {})
+      setCoreDialogOpen(false)
+    } catch (error) {
+      record(String(error), true)
+      await syncRuntime().catch(() => {})
+    } finally {
+      setCoreChanging(null)
+      setBusy(false)
+    }
+  }
   const loadLocalBackups = async () => {
     setBackupLoading(true)
     try {
@@ -1314,6 +1590,8 @@ function App() {
     setBusy(true)
     try {
       setDoc(await api.restoreLocalBackup(filename))
+      setMobilePreferences(await api.preferences())
+      await loadBackupSettings().catch(() => {})
       await syncRuntime().catch(() => {})
       await loadLocalBackups()
     } catch (e) {
@@ -1428,6 +1706,8 @@ function App() {
     setBusy(true)
     try {
       setDoc(await api.restoreWebDavBackup(filename))
+      setMobilePreferences(await api.preferences())
+      await loadBackupSettings().catch(() => {})
       await syncRuntime().catch(() => {})
     } catch (e) {
       record(String(e), true)
@@ -1453,7 +1733,7 @@ function App() {
     setDnsDialogOpen(true)
     setDnsLoading(true)
     try {
-      const settings = await api.dnsOverride()
+      const settings = await api.dnsOverride(active?.id)
       setDnsOverride(settings)
       setDnsDraft({ ...settings })
     } catch (e) {
@@ -1467,7 +1747,7 @@ function App() {
     if (busy || dnsLoading || !dnsDraft) return
     setBusy(true)
     try {
-      const applied = await api.setDnsOverride(dnsDraft)
+      const applied = await api.setDnsOverride(dnsDraft, active?.id)
       setDnsOverride(applied)
       setDnsDraft({ ...applied })
       setDnsDialogOpen(false)
@@ -1475,7 +1755,7 @@ function App() {
       showNotice.success('settings.modals.dns.messages.saved')
     } catch (e) {
       record(String(e), true)
-      void api.dnsOverride().then((settings) => {
+      void api.dnsOverride(active?.id).then((settings) => {
         setDnsOverride(settings)
         setDnsDraft({ ...settings })
       })
@@ -2002,7 +2282,14 @@ function App() {
                       disabled={!canEdit || !doc.profiles.some((profile) => profile.source)}
                       onClick={() => void refreshAllProfiles()}
                     >
-                      <RefreshRounded />
+                      <RefreshRounded
+                        sx={{
+                          animation:
+                            profileRefreshing.size > 0
+                              ? `1s linear infinite ${round}`
+                              : 'none',
+                        }}
+                      />
                     </IconButton>
                     <IconButton
                       size="small"
@@ -2628,6 +2915,33 @@ function App() {
                       </Stack>
                     </EnhancedCard>
                   </Grid>
+
+                  {(mobilePreferences?.homeCards.tests ?? true) && (
+                    <Grid size={6}>
+                      <MobileTestCard />
+                    </Grid>
+                  )}
+                  {(mobilePreferences?.homeCards.ip ?? true) && (
+                    <Grid size={6}>
+                      <MobileIpInfoCard />
+                    </Grid>
+                  )}
+                  {(mobilePreferences?.homeCards.systemInfo ?? true) && (
+                    <Grid size={6}>
+                      <MobileSystemInfoCard
+                        appVersion={appVersion}
+                        autoLaunch={bootModule?.installed ?? false}
+                        running={runtime?.coreRunning ?? false}
+                        serviceMode={runtime?.agentConnected ?? false}
+                        lastCheckUpdate={lastAppUpdateCheck}
+                        onToggleAutoLaunch={() =>
+                          void setBootAutostart(!(bootModule?.installed ?? false))
+                        }
+                        onCheckUpdate={() => void runAppUpdateCheck(true)}
+                        onSettings={() => setPage('settings')}
+                      />
+                    </Grid>
+                  )}
                 </Grid>
               )}
 
@@ -2679,20 +2993,38 @@ function App() {
                   {doc.profiles.length === 0 ? (
                     empty(zhProxies.page.empty.noSubscriptions.title)
                   ) : (
-                    <Box
-                      sx={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
-                        gap: 1,
-                        px: 0.5,
-                      }}
+                    <DragDropProvider
+                      key={profileDndRevision}
+                      sensors={[profilePointerSensor, KeyboardSensor]}
+                      onDragEnd={onProfileDragEnd}
                     >
-                      {doc.profiles.map((profile) => {
-                        const selected = profile.id === doc.activeId
-                        const batchSelected = selectedProfiles.has(profile.id)
-                        return (
+                      <Box
+                        sx={{
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+                          gap: 1,
+                          px: 0.5,
+                        }}
+                      >
+                        {doc.profiles.map((profile, index) => {
+                          const selected = profile.id === doc.activeId
+                          const batchSelected = selectedProfiles.has(profile.id)
+                          const refreshing = profileRefreshing.has(profile.id)
+                          const activating = activatingProfileId === profile.id
+                          const used = (profile.extra?.upload ?? 0) + (profile.extra?.download ?? 0)
+                          const total = profile.extra?.total ?? 0
+                          const progress = total > 0 ? Math.min((used / total) * 100, 100) : 0
+                          const expire = profile.extra?.expire
+                            ? dayjs(profile.extra.expire * 1000).format('YYYY-MM-DD')
+                            : '-'
+                          return (
+                            <SortableItem
+                              key={profile.id}
+                              id={profile.id}
+                              index={index}
+                              disabled={profileBatchMode || busy || refreshing || activating}
+                            >
                           <ProfileBox
-                            key={profile.id}
                             aria-selected={selected}
                             onClick={() => {
                               if (profileBatchMode) {
@@ -2702,6 +3034,34 @@ function App() {
                               }
                             }}
                           >
+                            {activating && (
+                              <Box
+                                sx={{
+                                  position: 'absolute',
+                                  display: 'flex',
+                                  justifyContent: 'center',
+                                  alignItems: 'center',
+                                  inset: 0,
+                                  borderRadius: 'inherit',
+                                  zIndex: 10,
+                                  backdropFilter: 'blur(2px)',
+                                  backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                                }}
+                              >
+                                <CircularProgress
+                                  color="inherit"
+                                  size={20}
+                                  sx={{
+                                    animation: 'pulse 1.5s ease-in-out infinite',
+                                    '@keyframes pulse': {
+                                      '0%': { opacity: 1 },
+                                      '50%': { opacity: 0.5 },
+                                      '100%': { opacity: 1 },
+                                    },
+                                  }}
+                                />
+                              </Box>
+                            )}
                             <Box sx={{ position: 'relative' }}>
                               <Box sx={{ display: 'flex', justifyContent: 'start' }}>
                                 {profileBatchMode && (
@@ -2723,6 +3083,17 @@ function App() {
                                       <CheckBoxOutlineBlankRounded />
                                     )}
                                   </IconButton>
+                                )}
+                                {!profileBatchMode && (
+                                  <Box
+                                    data-sortable-handle
+                                    sx={{ display: 'flex', margin: 'auto 0' }}
+                                    onClick={(event) => event.stopPropagation()}
+                                  >
+                                    <DragIndicatorRounded
+                                      sx={{ cursor: 'move', marginLeft: '-6px' }}
+                                    />
+                                  </Box>
                                 )}
                                 <Typography
                                   variant="h6"
@@ -2751,7 +3122,15 @@ function App() {
                                     event.stopPropagation()
                                     void refreshProfile(profile)
                                   }}
-                                  sx={{ position: 'absolute', p: '3px', top: -1, right: 26 }}
+                                  sx={{
+                                    position: 'absolute',
+                                    p: '3px',
+                                    top: -1,
+                                    right: 26,
+                                    animation: refreshing
+                                      ? `1s linear infinite ${round}`
+                                      : 'none',
+                                  }}
                                 >
                                   <RefreshRounded color="inherit" />
                                 </IconButton>
@@ -2770,24 +3149,72 @@ function App() {
                                 </IconButton>
                               )}
                             </Box>
-                            <Stack direction="row" sx={{ justifyContent: 'space-between', mt: 0.75 }}>
+                            <Box
+                              sx={{
+                                height: 26,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                mt: 0.75,
+                              }}
+                            >
                               <Typography
                                 variant="body2"
                                 noWrap
                                 title={
-                                  profile.source ?? zhProfiles.modals.profileForm.types.local
+                                  profile.description ||
+                                  `${zhShared.labels.from} ${sourceLabel(profile.source)}`
                                 }
                               >
-                                {sourceLabel(profile.source)}
+                                {profile.description || sourceLabel(profile.source)}
                               </Typography>
-                              <Typography variant="body2" sx={{ ml: 1, flexShrink: 0 }}>
-                                {new Date(profile.updatedAt * 1000).toLocaleString()}
-                              </Typography>
-                            </Stack>
+                              {profile.source && (
+                                <Typography variant="body2" sx={{ ml: 1, flexShrink: 0 }}>
+                                  {dayjs(profile.updatedAt * 1000).fromNow()}
+                                </Typography>
+                              )}
+                            </Box>
+                            {profile.extra ? (
+                              <Box
+                                sx={{
+                                  height: 26,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  fontSize: 14,
+                                }}
+                              >
+                                <span title={zhShared.labels.usedTotal}>
+                                  {formatBytes(used)} / {formatBytes(total)}
+                                </span>
+                                <span title={zhShared.labels.expireTime}>{expire}</span>
+                              </Box>
+                            ) : (
+                              <Box
+                                sx={{
+                                  height: 26,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'flex-end',
+                                  fontSize: 12,
+                                }}
+                              >
+                                <span title={zhShared.labels.updateTime}>
+                                  {new Date(profile.updatedAt * 1000).toLocaleString()}
+                                </span>
+                              </Box>
+                            )}
+                            <LinearProgress
+                              variant="determinate"
+                              value={progress}
+                              sx={{ opacity: total > 0 ? 1 : 0 }}
+                            />
                           </ProfileBox>
-                        )
-                      })}
-                    </Box>
+                            </SortableItem>
+                          )
+                        })}
+                      </Box>
+                    </DragDropProvider>
                   )}
 
                   <Menu
@@ -2796,6 +3223,18 @@ function App() {
                     onClose={() => setProfileMenu(null)}
                     slotProps={{ list: { sx: { py: 0.5 } } }}
                   >
+                    {profileMenu?.profile.home && (
+                      <MenuItem
+                        dense
+                        onClick={() => {
+                          const profile = profileMenu.profile
+                          setProfileMenu(null)
+                          if (profile.home) void api.openExternalUrl(profile.home)
+                        }}
+                      >
+                        {zhProfiles.components.menu.home}
+                      </MenuItem>
+                    )}
                     <MenuItem
                       dense
                       disabled={profileMenu?.profile.id === doc.activeId}
@@ -2807,6 +3246,18 @@ function App() {
                     >
                       {zhProfiles.components.menu.select}
                     </MenuItem>
+                    {profileMenu?.profile.source && (
+                      <MenuItem
+                        dense
+                        onClick={() => {
+                          const profile = profileMenu.profile
+                          setProfileMenu(null)
+                          setQrProfile(profile)
+                        }}
+                      >
+                        {zhProfiles.components.menu.shareQrCode}
+                      </MenuItem>
+                    )}
                     {profileMenu?.profile.source && (
                       <MenuItem
                         dense
@@ -2892,6 +3343,11 @@ function App() {
                       {zhShared.actions.delete}
                     </MenuItem>
                   </Menu>
+                  <QrViewer
+                    open={Boolean(qrProfile?.source)}
+                    value={qrProfile?.source ?? ''}
+                    onClose={() => setQrProfile(null)}
+                  />
                 </>
               )}
 
@@ -3282,11 +3738,32 @@ function App() {
                   <Grid size={6}>
                     <Box className="verge-setting-panel">
                       <SettingList title={zhSettings.components.verge.basic.title}>
+                        <SettingItem label={zhSettings.components.verge.basic.fields.language}>
+                          <BaseStyledSelect
+                            size="small"
+                            value={mobilePreferences?.language ?? 'zh'}
+                            disabled={busy || mobilePreferences === null}
+                            onChange={(event) => {
+                              const language = String(event.target.value)
+                              void changeLanguage(language)
+                              void updateMobilePreferences({ language })
+                            }}
+                            sx={{ width: 140, '> div': { py: '7.5px' } }}
+                          >
+                            {supportedLanguages.map((language) => (
+                              <MenuItem key={language} value={language}>
+                                {languageLabels[language] ?? language}
+                              </MenuItem>
+                            ))}
+                          </BaseStyledSelect>
+                        </SettingItem>
                         <SettingItem label={zhSettings.components.verge.basic.fields.themeMode}>
                           <ThemeModeSwitch
                             value={themeMode}
                             onChange={(mode) => {
-                              if (mode) updateThemeMode(mode)
+                              if (!mode) return
+                              updateThemeMode(mode)
+                              void updateMobilePreferences({ themeMode: mode })
                             }}
                           />
                         </SettingItem>
@@ -3327,6 +3804,15 @@ function App() {
                             disabled={busy || mobilePreferences === null}
                             onChange={(_, autoCloseConnection) =>
                               void updateMobilePreferences({ autoCloseConnection })
+                            }
+                          />
+                        </SettingItem>
+                        <SettingItem label={zhSettings.modals.misc.fields.autoCheckUpdate}>
+                          <Switch
+                            checked={mobilePreferences?.autoCheckUpdate ?? true}
+                            disabled={busy || mobilePreferences === null}
+                            onChange={(_, autoCheckUpdate) =>
+                              void updateMobilePreferences({ autoCheckUpdate })
                             }
                           />
                         </SettingItem>
@@ -3608,7 +4094,15 @@ function App() {
                     <Box className="verge-setting-panel">
                       <SettingList title={zhSettings.sections.clash.form.fields.clashCore}>
                         <SettingItem
-                          label={zhSettings.components.verge.advanced.fields.checkUpdates}
+                          label={
+                            (mobilePreferences?.coreVariant ?? 'stable') === 'alpha'
+                              ? 'Mihomo Alpha'
+                              : 'Mihomo'
+                          }
+                          onClick={() => setCoreDialogOpen(true)}
+                        />
+                        <SettingItem
+                          label={zhShared.actions.upgrade}
                           onClick={upgradeCore}
                         />
                         <SettingItem
@@ -3634,11 +4128,15 @@ function App() {
                     <Box className="verge-setting-panel">
                       <SettingList title={zhSettings.components.verge.advanced.title}>
                         <SettingItem label={zhSettings.components.verge.advanced.fields.vergeVersion}>
-                          <Typography variant="body2">0.1.0-alpha.2</Typography>
+                          <Typography variant="body2">{appVersion}</Typography>
                         </SettingItem>
                         <SettingItem
+                          label={zhSettings.components.verge.advanced.fields.checkUpdates}
+                          onClick={checkAppUpdateManual}
+                        />
+                        <SettingItem
                           label={zhSettings.components.verge.advanced.fields.exportDiagnostics}
-                          onClick={() => void openDiagnostics()}
+                          onClick={openDiagnostics}
                         />
                       </SettingList>
                     </Box>
@@ -3713,6 +4211,122 @@ function App() {
           ref={connectionDetailRef}
           onCloseConnection={closeConnection}
         />
+
+        <Dialog
+          open={coreDialogOpen}
+          fullWidth
+          maxWidth="xs"
+          onClose={() => {
+            if (!coreChanging) setCoreDialogOpen(false)
+          }}
+          slotProps={{ paper: { sx: { borderRadius: 2 } } }}
+        >
+          <DialogTitle>{zhSettings.sections.clash.form.fields.clashCore}</DialogTitle>
+          <DialogContent dividers sx={{ p: 0 }}>
+            <List component="nav">
+              {([
+                {
+                  name: 'Mihomo',
+                  variant: 'stable' as const,
+                  chip: zhSettings.modals.clashCore.variants.release,
+                },
+                {
+                  name: 'Mihomo Alpha',
+                  variant: 'alpha' as const,
+                  chip: zhSettings.modals.clashCore.variants.alpha,
+                },
+              ]).map((item) => (
+                <ListItemButton
+                  key={item.variant}
+                  selected={(mobilePreferences?.coreVariant ?? 'stable') === item.variant}
+                  disabled={
+                    coreChanging !== null ||
+                    !runtime?.agentConnected ||
+                    (mobilePreferences?.coreVariant ?? 'stable') === item.variant
+                  }
+                  onClick={() => void changeCoreVariant(item.variant)}
+                >
+                  <ListItemText primary={item.name} />
+                  {coreChanging === item.variant ? (
+                    <CircularProgress size={20} sx={{ mr: 1 }} />
+                  ) : (
+                    <Chip label={item.chip} size="small" />
+                  )}
+                </ListItemButton>
+              ))}
+            </List>
+          </DialogContent>
+          <DialogActions>
+            <Button
+              disabled={coreChanging !== null}
+              onClick={() => setCoreDialogOpen(false)}
+            >
+              {zhShared.actions.close}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        <Dialog
+          open={appUpdateDialogOpen && appUpdateInfo !== null}
+          fullWidth
+          maxWidth="sm"
+          onClose={() => {
+            if (!appUpdating) setAppUpdateDialogOpen(false)
+          }}
+          slotProps={{ paper: { sx: { borderRadius: 2 } } }}
+        >
+          <DialogTitle>
+            {zhSettings.modals.update.title.replace(
+              '{{version}}',
+              appUpdateInfo?.version ?? '',
+            )}
+          </DialogTitle>
+          <DialogContent dividers>
+            <Stack spacing={2}>
+              <Alert severity="info">{zhSettings.modals.update.messages.available}</Alert>
+              {appUpdateInfo?.body && (
+                <Typography
+                  variant="body2"
+                  component="div"
+                  sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+                >
+                  {appUpdateInfo.body}
+                </Typography>
+              )}
+              {appUpdating && (
+                <LinearProgress
+                  variant={appUpdateProgress.total > 0 ? 'determinate' : 'indeterminate'}
+                  value={
+                    appUpdateProgress.total > 0
+                      ? Math.min(
+                          (appUpdateProgress.downloaded / appUpdateProgress.total) * 100,
+                          100,
+                        )
+                      : 0
+                  }
+                />
+              )}
+            </Stack>
+          </DialogContent>
+          <DialogActions>
+            <Button
+              disabled={appUpdating || !appUpdateInfo?.htmlUrl}
+              onClick={() => {
+                if (appUpdateInfo?.htmlUrl) void api.openExternalUrl(appUpdateInfo.htmlUrl)
+              }}
+            >
+              {zhSettings.modals.update.actions.goToRelease}
+            </Button>
+            <Button
+              variant="contained"
+              loading={appUpdating}
+              disabled={!appUpdateInfo}
+              onClick={() => void installAppUpdate()}
+            >
+              {zhSettings.modals.update.actions.update}
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         <Dialog
           open={runtimeConfigOpen}
@@ -3935,42 +4549,15 @@ function App() {
         >
           <DialogTitle>{zhSettings.modals.dns.dialog.title}</DialogTitle>
           <DialogContent dividers>
-            <Stack spacing={1.5}>
-              <Alert severity="info">{zhSettings.modals.dns.dialog.warning}</Alert>
-              {dnsLoading || !dnsDraft ? (
-                <Typography color="text.secondary">{zhShared.statuses.loading}</Typography>
-              ) : (
-                <>
-                  <SettingList title={zhSettings.modals.dns.sections.general}>
-                    <SettingItem label={zhSettings.modals.dns.fields.enable}>
-                      <Switch
-                        checked={dnsDraft.enabled}
-                        disabled={busy}
-                        onChange={(_, enabled) =>
-                          setDnsDraft((old) => (old ? { ...old, enabled } : old))
-                        }
-                      />
-                    </SettingItem>
-                  </SettingList>
-                  <TextField
-                    label="YAML"
-                    multiline
-                    minRows={14}
-                    fullWidth
-                    disabled={busy}
-                    value={dnsDraft.yaml}
-                    onChange={(event) =>
-                      setDnsDraft((old) =>
-                        old ? { ...old, yaml: event.target.value } : old,
-                      )
-                    }
-                    placeholder={`dns:\n  enable: true\n  enhanced-mode: fake-ip\n  nameserver:\n    - https://dns.alidns.com/dns-query\nhosts: {}`}
-                    slotProps={{ htmlInput: { spellCheck: false } }}
-                    size="small"
-                  />
-                </>
-              )}
-            </Stack>
+            {dnsLoading || !dnsDraft ? (
+              <Typography color="text.secondary">{zhShared.statuses.loading}</Typography>
+            ) : (
+              <MobileDnsEditor
+                settings={dnsDraft}
+                disabled={busy}
+                onChange={setDnsDraft}
+              />
+            )}
           </DialogContent>
           <DialogActions>
             <Button
@@ -3981,6 +4568,7 @@ function App() {
             </Button>
             <Button
               variant="contained"
+              loading={busy}
               disabled={
                 busy ||
                 dnsLoading ||
@@ -3989,7 +4577,7 @@ function App() {
               }
               onClick={() => void saveDnsSettings()}
             >
-              {busy ? zhShared.statuses.saving : zhShared.actions.save}
+              {zhShared.actions.save}
             </Button>
           </DialogActions>
         </Dialog>
@@ -4306,17 +4894,6 @@ function App() {
                     onChange={(_, strictRoute) =>
                       setTunDraft((old) =>
                         old ? { ...old, strictRoute } : old,
-                      )
-                    }
-                  />
-                </SettingItem>
-                <SettingItem label={zhSettings.modals.tun.fields.autoDetectInterface}>
-                  <Switch
-                    edge="end"
-                    checked={tunDraft.autoDetectInterface}
-                    onChange={(_, autoDetectInterface) =>
-                      setTunDraft((old) =>
-                        old ? { ...old, autoDetectInterface } : old,
                       )
                     }
                   />
@@ -4843,6 +5420,16 @@ function App() {
                     fullWidth
                     size="small"
                   />
+                  <TextField
+                    name="description"
+                    label={zhProfiles.modals.profileForm.fields.description}
+                    autoComplete="off"
+                    value={description}
+                    disabled={busy}
+                    onChange={(event) => setDescription(event.target.value)}
+                    fullWidth
+                    size="small"
+                  />
                   {(form?.kind === 'subscription' ||
                     (form?.kind === 'edit' && Boolean(form.profile.source))) && (
                     <TextField
@@ -5053,6 +5640,6 @@ function App() {
 const element = document.getElementById('root')
 if (!element) throw new Error('Missing root element')
 const render = () => createRoot(element).render(<App />)
-void initializeLanguage('zh')
+void initializeLanguage(getCachedLanguage() ?? navigator.language ?? 'zh')
   .catch((error) => console.warn('[mobile] i18n init failed', error))
   .finally(render)

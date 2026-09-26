@@ -1,4 +1,6 @@
 <resources>
     <string name="app_name">"Clash Verge for Android"</string>
     <string name="main_activity_title">"Clash Verge for Android"</string>
+    <string name="qs_system_proxy">系统代理</string>
+    <string name="qs_tun_mode">虚拟网卡模式</string>
 </resources>

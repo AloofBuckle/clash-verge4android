@@ -13,10 +13,9 @@ import {
   useTheme,
 } from '@mui/material'
 import { type ReactNode } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { BaseEmpty } from '@/components/base/base-empty'
-import zhHome from '@/locales/zh/home.json'
-import zhProxies from '@/locales/zh/proxies.json'
 
 export function MobileEmpty({ text, action }: { text: string; action?: ReactNode }) {
   return (
@@ -55,10 +54,11 @@ function TrafficStat({ icon, title, value, color }: { icon: ReactNode; title: st
 }
 
 export function MobileTrafficStats({ upload, download }: { upload: string; download: string }) {
+  const { t } = useTranslation()
   return (
     <Stack direction="row" spacing={1}>
-      <TrafficStat icon={<ArrowUpwardRounded fontSize="small" />} title={zhHome.components.traffic.metrics.uploadSpeed} value={upload} color="secondary" />
-      <TrafficStat icon={<ArrowDownwardRounded fontSize="small" />} title={zhHome.components.traffic.metrics.downloadSpeed} value={download} color="primary" />
+      <TrafficStat icon={<ArrowUpwardRounded fontSize="small" />} title={t('home.components.traffic.metrics.uploadSpeed')} value={upload} color="secondary" />
+      <TrafficStat icon={<ArrowDownwardRounded fontSize="small" />} title={t('home.components.traffic.metrics.downloadSpeed')} value={download} color="primary" />
     </Stack>
   )
 }
@@ -72,6 +72,7 @@ export function MobileModeButtons({
   disabled: boolean
   onChange: (mode: 'rule' | 'global' | 'direct') => void
 }) {
+  const { t } = useTranslation()
   return (
     <ButtonGroup size="small" fullWidth>
       {(['rule', 'global', 'direct'] as const).map((item) => (
@@ -82,7 +83,7 @@ export function MobileModeButtons({
           onClick={() => onChange(item)}
           sx={{ textTransform: 'capitalize' }}
         >
-          {zhProxies.page.modes[item]}
+          {t(`proxies.page.modes.${item}`)}
         </Button>
       ))}
     </ButtonGroup>

@@ -40,6 +40,7 @@ clash-verge-mobile = { path = "../crates/clash-verge-mobile" }
 cv4a-mihomo-client = { path = "../crates/cv4a-mihomo-client" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "net"] }
 reqwest = { workspace = true }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
@@ -51,6 +52,8 @@ reqwest_dav = "0.3.3"
 network-interface = { version = "2.0.5", features = ["serde"] }
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-fs = "2.5.2"
+tauri-plugin-http = "2.6.1"
+semver = "1.0.27"
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
 clash-verge-draft = { workspace = true }

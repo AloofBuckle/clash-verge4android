@@ -1,11 +1,13 @@
 use crate::android_vpn::{AndroidVpn, AndroidVpnStart, AndroidVpnStatus};
 use clash_verge_mobile::{
-    Capabilities, Document, MAX_PROFILE_BYTES, ProfileOptions, RuntimeEnhancements, RuntimeOverrides, Store, Summary,
+    Capabilities, Document, MAX_PROFILE_BYTES, ProfileExtra, ProfileOptions, RuntimeEnhancements, RuntimeOverrides,
+    Store, Summary,
 };
 use cv4a_mihomo_client::Snapshot as CoreSnapshot;
 use flate2::read::GzDecoder;
 use percent_encoding::percent_decode_str;
 use reqwest_dav::list_cmd::{ListEntity, ListMultiStatus};
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -20,16 +22,22 @@ use std::{
     sync::Mutex,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const ROOT_RUNTIME: &str = "/data/adb/clash-verge4android";
 const PACKAGED_MIHOMO_VERSION: &str = "v1.19.31";
 const MIHOMO_RELEASE_VERSION_URL: &str = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt";
 const MIHOMO_RELEASE_DOWNLOAD_BASE: &str = "https://github.com/MetaCubeX/mihomo/releases/download";
+const MIHOMO_ALPHA_VERSION_URL: &str =
+    "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha/version.txt";
+const MIHOMO_ALPHA_DOWNLOAD_BASE: &str = "https://github.com/MetaCubeX/mihomo/releases/download/Prerelease-Alpha";
+const APP_RELEASES_URL: &str = "https://api.github.com/repos/AloofBuckle/clash-verge4android/releases?per_page=30";
+const APP_RELEASE_ASSET_PREFIX: &str = "https://github.com/AloofBuckle/clash-verge4android/releases/download/";
 const MAX_CORE_PACKAGE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CORE_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-const MOBILE_BACKUP_FORMAT_VERSION: u32 = 1;
+const MAX_APP_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+const MOBILE_BACKUP_FORMAT_VERSION: u32 = 2;
 const MAX_MOBILE_BACKUP_BYTES: u64 = 16 * 1024 * 1024;
 const WEBDAV_BACKUP_DIR: &str = "cv4a-backups";
 const AUTO_BACKUP_KEEP: usize = 20;
@@ -79,6 +87,7 @@ struct MobileState {
     backup_settings_path: PathBuf,
     client: reqwest::Client,
     auto_update_attempts: Mutex<HashMap<String, u64>>,
+    app_update_progress: Mutex<AppUpdateProgress>,
     app_data_dir: PathBuf,
     agent_socket: PathBuf,
     controller_socket: PathBuf,
@@ -90,22 +99,62 @@ struct MobileState {
 #[serde(rename_all = "camelCase", default)]
 struct MobilePreferences {
     auto_close_connection: bool,
+    auto_check_update: bool,
     default_latency_test: String,
     default_latency_timeout: u64,
     enable_auto_delay_detection: bool,
     auto_delay_detection_interval_minutes: u64,
     start_page: String,
+    language: String,
+    theme_mode: String,
+    home_cards: MobileHomeCards,
+    core_variant: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+struct MobileHomeCards {
+    profile: bool,
+    proxy: bool,
+    network: bool,
+    mode: bool,
+    traffic: bool,
+    clash_info: bool,
+    system_info: bool,
+    tests: bool,
+    ip: bool,
+}
+
+impl Default for MobileHomeCards {
+    fn default() -> Self {
+        Self {
+            profile: true,
+            proxy: true,
+            network: true,
+            mode: true,
+            traffic: true,
+            clash_info: true,
+            system_info: true,
+            tests: true,
+            ip: true,
+        }
+    }
 }
 
 impl Default for MobilePreferences {
     fn default() -> Self {
         Self {
             auto_close_connection: true,
+            auto_check_update: true,
             default_latency_test: "http://cp.cloudflare.com/generate_204".into(),
             default_latency_timeout: 10_000,
             enable_auto_delay_detection: false,
             auto_delay_detection_interval_minutes: 5,
             start_page: "home".into(),
+            language: "zh".into(),
+            theme_mode: "system".into(),
+            home_cards: MobileHomeCards::default(),
+            core_variant: "stable".into(),
         }
     }
 }
@@ -132,6 +181,25 @@ impl MobilePreferences {
             "home" | "proxies" | "profiles" | "connections" | "rules" | "logs" | "settings"
         ) {
             return Err("Invalid mobile start page".into());
+        }
+        self.language = self.language.trim().to_ascii_lowercase().replace('_', "-");
+        if self.language == "zh-cn" {
+            self.language = "zh".into();
+        } else if self.language == "zh-tw" {
+            self.language = "zhtw".into();
+        }
+        if !matches!(
+            self.language.as_str(),
+            "en" | "ru" | "zh" | "fa" | "tt" | "id" | "ar" | "ko" | "tr" | "de" | "es" | "jp" | "zhtw"
+        ) {
+            return Err("Invalid mobile language".into());
+        }
+        if !matches!(self.theme_mode.as_str(), "light" | "dark" | "system") {
+            return Err("Invalid mobile theme mode".into());
+        }
+        self.core_variant = self.core_variant.trim().to_ascii_lowercase();
+        if !matches!(self.core_variant.as_str(), "stable" | "alpha") {
+            return Err("Invalid Mihomo core variant".into());
         }
         Ok(self)
     }
@@ -250,6 +318,15 @@ fn active_profile(state: &MobileState) -> Result<clash_verge_mobile::Profile, St
         .ok_or_else(|| "Active profile is missing".into())
 }
 
+fn profile_runtime_overrides(profile: &clash_verge_mobile::Profile, overrides: &RuntimeOverrides) -> RuntimeOverrides {
+    let mut effective = overrides.clone();
+    if profile.dns_override_enabled.is_some() || profile.dns_override_yaml.is_some() {
+        effective.dns_override_enabled = profile.dns_override_enabled;
+        effective.dns_override_yaml = profile.dns_override_yaml.clone();
+    }
+    effective
+}
+
 fn render_runtime_config(
     state: &MobileState,
     source: &str,
@@ -273,17 +350,18 @@ fn render_runtime_config(
         profile_script: profile.script_js.as_deref(),
         profile_name: &profile.name,
     };
+    let effective_overrides = profile_runtime_overrides(profile, overrides);
     if transparent {
         clash_verge_mobile::runtime_tun_config_with_enhancements(
             source,
-            overrides,
+            &effective_overrides,
             enhancements,
             profile.proxy_chain.as_ref(),
         )
     } else {
         clash_verge_mobile::runtime_preview_config_with_enhancements(
             source,
-            overrides,
+            &effective_overrides,
             enhancements,
             profile.proxy_chain.as_ref(),
         )
@@ -299,6 +377,7 @@ fn render_android_vpn_config(state: &MobileState) -> Result<(String, HashMap<Str
         .find(|profile| profile.id == active_id)
         .ok_or("Active profile is missing")?;
     let overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
+    let effective_overrides = profile_runtime_overrides(profile, &overrides);
     let enhancements = RuntimeEnhancements {
         rules: profile.rules_yaml.as_deref(),
         proxies: profile.proxies_yaml.as_deref(),
@@ -311,7 +390,7 @@ fn render_android_vpn_config(state: &MobileState) -> Result<(String, HashMap<Str
     };
     let yaml = clash_verge_mobile::runtime_android_vpn_config_with_enhancements(
         &profile.yaml,
-        &overrides,
+        &effective_overrides,
         enhancements,
         profile.proxy_chain.as_ref(),
     )?;
@@ -374,6 +453,52 @@ struct CoreUpgradeReport {
     to: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoreVariantStatus {
+    variant: String,
+    version: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgress {
+    active: bool,
+    downloaded: u64,
+    total: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateInfo {
+    current_version: String,
+    version: String,
+    tag_name: String,
+    body: String,
+    html_url: String,
+    asset_url: String,
+    asset_name: String,
+    asset_size: u64,
+    published_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    body: Option<String>,
+    html_url: String,
+    draft: bool,
+    published_at: Option<String>,
+    assets: Vec<GithubReleaseAsset>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MobileBackup {
@@ -381,6 +506,18 @@ struct MobileBackup {
     created_at: u64,
     profiles: Document,
     runtime_overrides: RuntimeOverrides,
+    #[serde(default)]
+    mobile_preferences: Option<MobilePreferences>,
+    #[serde(default)]
+    backup_preferences: Option<BackupPreferencesSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupPreferencesSnapshot {
+    auto_schedule_enabled: bool,
+    auto_interval_hours: u64,
+    auto_on_change: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -562,8 +699,16 @@ fn validate_backup_name(filename: &str) -> Result<(), String> {
 }
 
 fn validate_mobile_backup(backup: &MobileBackup) -> Result<(), String> {
-    if backup.format_version != MOBILE_BACKUP_FORMAT_VERSION {
+    if !(1..=MOBILE_BACKUP_FORMAT_VERSION).contains(&backup.format_version) {
         return Err(format!("Unsupported backup format version {}", backup.format_version));
+    }
+    if let Some(preferences) = backup.mobile_preferences.clone() {
+        preferences.normalized()?;
+    }
+    if let Some(settings) = backup.backup_preferences.as_ref()
+        && !(1..=168).contains(&settings.auto_interval_hours)
+    {
+        return Err("Automatic backup interval must be between 1 and 168 hours".into());
     }
     if let Some(active_id) = backup.profiles.active_id.as_ref()
         && !backup.profiles.profiles.iter().any(|profile| &profile.id == active_id)
@@ -726,6 +871,7 @@ async fn mobile_delete_many(ids: Vec<String>, state: State<'_, MobileState>) -> 
 async fn mobile_update_profile(
     id: String,
     name: String,
+    description: Option<String>,
     yaml: String,
     expected_yaml: String,
     source: Option<String>,
@@ -746,24 +892,26 @@ async fn mobile_update_profile(
     } else {
         (false, false)
     };
-    let document = state.store.lock().map_err(|e| e.to_string())?.update_with_options(
+    let document = state.store.lock().map_err(|e| e.to_string())?.update_with_metadata(
         &id,
         name,
         yaml.clone(),
         source.or_else(|| profile.source.clone()),
         option.unwrap_or_else(|| profile.option.clone()),
+        description,
         &expected_yaml,
     )?;
     if is_active
         && yaml_changed
         && let Err(error) = reload_running_core(&state).await
     {
-        let rollback = state.store.lock().map_err(|e| e.to_string())?.update_with_options(
+        let rollback = state.store.lock().map_err(|e| e.to_string())?.update_with_metadata(
             &id,
             profile.name.clone(),
             profile.yaml.clone(),
             profile.source.clone(),
             profile.option.clone(),
+            profile.description.clone(),
             &yaml,
         );
         if was_running {
@@ -944,7 +1092,47 @@ async fn mobile_set_profile_script(
     Ok(document)
 }
 
-async fn download(client: &reqwest::Client, source: &str, user_agent: Option<&str>) -> Result<String, String> {
+#[derive(Clone, Debug)]
+struct DownloadedSubscription {
+    yaml: String,
+    extra: Option<ProfileExtra>,
+    home: Option<String>,
+    update_interval: Option<u64>,
+}
+
+fn parse_subscription_userinfo(value: &str) -> ProfileExtra {
+    let mut extra = ProfileExtra::default();
+    for part in value.split(';') {
+        let Some((key, raw)) = part.trim().split_once('=') else {
+            continue;
+        };
+        let Ok(number) = raw.trim().parse::<u64>() else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "upload" => extra.upload = number,
+            "download" => extra.download = number,
+            "total" => extra.total = number,
+            "expire" => extra.expire = number,
+            _ => {}
+        }
+    }
+    extra
+}
+
+fn normalize_profile_home_url(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+async fn download(
+    client: &reqwest::Client,
+    source: &str,
+    user_agent: Option<&str>,
+) -> Result<DownloadedSubscription, String> {
     let url = reqwest::Url::parse(source).map_err(|e| e.to_string())?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -961,6 +1149,23 @@ async fn download(client: &reqwest::Client, source: &str, user_agent: Option<&st
         .map_err(|e| format!("Subscription download failed: {}", e.without_url()))?
         .error_for_status()
         .map_err(|e| format!("Subscription HTTP error: {}", e.without_url()))?;
+    let headers = response.headers().clone();
+    let extra = headers.iter().find_map(|(name, value)| {
+        let key = name.as_str().to_ascii_lowercase();
+        key.strip_suffix("subscription-userinfo")
+            .filter(|prefix| prefix.is_empty() || prefix.ends_with('-'))
+            .and_then(|_| value.to_str().ok())
+            .map(parse_subscription_userinfo)
+    });
+    let home = headers
+        .get("profile-web-page-url")
+        .and_then(|value| value.to_str().ok())
+        .and_then(normalize_profile_home_url);
+    let update_interval = headers
+        .get("profile-update-interval")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|hours| hours.checked_mul(60));
     if response
         .content_length()
         .is_some_and(|len| len > MAX_PROFILE_BYTES as u64)
@@ -976,10 +1181,19 @@ async fn download(client: &reqwest::Client, source: &str, user_agent: Option<&st
     }
     let yaml = String::from_utf8(data).map_err(|_| "Subscription is not UTF-8".to_owned())?;
     clash_verge_mobile::inspect(&yaml)?;
-    Ok(yaml)
+    Ok(DownloadedSubscription {
+        yaml,
+        extra,
+        home,
+        update_interval,
+    })
 }
 
-async fn download_subscription(state: &MobileState, source: &str, option: &ProfileOptions) -> Result<String, String> {
+async fn download_subscription(
+    state: &MobileState,
+    source: &str,
+    option: &ProfileOptions,
+) -> Result<DownloadedSubscription, String> {
     let option = option.clone().normalized()?;
     if option.with_proxy.unwrap_or(false) {
         return Err("Android system-proxy subscription updates are not enabled in the Root TUN backend".into());
@@ -1022,7 +1236,7 @@ async fn download_subscription(state: &MobileState, source: &str, option: &Profi
     .await;
     let restore = controller.patch_mixed_port_settings(&previous).await;
     match (result, restore) {
-        (Ok(yaml), Ok(())) => Ok(yaml),
+        (Ok(downloaded), Ok(())) => Ok(downloaded),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(format!(
             "Subscription downloaded, but the temporary Clash proxy listener could not be restored: {error}"
@@ -1138,17 +1352,25 @@ fn stage_online_core(app_data_dir: &Path, package: &[u8]) -> Result<PathBuf, Str
 #[tauri::command]
 async fn mobile_subscribe(
     name: String,
+    description: Option<String>,
     url: String,
     option: Option<ProfileOptions>,
     state: State<'_, MobileState>,
 ) -> Result<Document, String> {
-    let option = option.unwrap_or_default().normalized()?;
-    let yaml = download_subscription(&state, url.trim(), &option).await?;
-    state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .import_with_options(name, yaml, Some(url.trim().to_owned()), option)
+    let mut option = option.unwrap_or_default().normalized()?;
+    let downloaded = download_subscription(&state, url.trim(), &option).await?;
+    if option.update_interval.is_none() {
+        option.update_interval = downloaded.update_interval;
+    }
+    state.store.lock().map_err(|e| e.to_string())?.import_with_metadata(
+        name,
+        downloaded.yaml,
+        Some(url.trim().to_owned()),
+        option,
+        description,
+        downloaded.home,
+        downloaded.extra,
+    )
 }
 
 async fn refresh_profile_internal(state: &MobileState, id: &str) -> Result<Document, String> {
@@ -1165,7 +1387,8 @@ async fn refresh_profile_internal(state: &MobileState, id: &str) -> Result<Docum
         .source
         .clone()
         .ok_or("This is a local configuration, not a subscription")?;
-    let yaml = download_subscription(state, &url, &profile.option).await?;
+    let downloaded = download_subscription(state, &url, &profile.option).await?;
+    let yaml = downloaded.yaml;
     let new_yaml = yaml.clone();
     let before = state.store.lock().map_err(|e| e.to_string())?.document();
     let is_active = before.active_id.as_deref() == Some(id);
@@ -1174,11 +1397,13 @@ async fn refresh_profile_internal(state: &MobileState, id: &str) -> Result<Docum
     } else {
         (false, false)
     };
-    let document = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .replace(id, yaml, &profile.yaml)?;
+    let document = state.store.lock().map_err(|e| e.to_string())?.replace_with_metadata(
+        id,
+        yaml,
+        &profile.yaml,
+        downloaded.home,
+        downloaded.extra,
+    )?;
     if is_active && let Err(error) = reload_running_core(state).await {
         let rollback = state
             .store
@@ -1529,10 +1754,17 @@ async fn installed_core_version(state: &MobileState) -> Result<String, String> {
     parse_core_version_output(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[tauri::command]
-async fn mobile_core_upgrade(force: bool, state: State<'_, MobileState>) -> Result<CoreUpgradeReport, String> {
+async fn upgrade_core_variant(variant: &str, force: bool, state: &MobileState) -> Result<CoreUpgradeReport, String> {
+    if !matches!(variant, "stable" | "alpha") {
+        return Err("Invalid Mihomo core variant".into());
+    }
     let installed = installed_core_version(&state).await.unwrap_or_default();
-    let version_bytes = download_core_resource(&state, MIHOMO_RELEASE_VERSION_URL, 4096, 20).await?;
+    let version_url = if variant == "alpha" {
+        MIHOMO_ALPHA_VERSION_URL
+    } else {
+        MIHOMO_RELEASE_VERSION_URL
+    };
+    let version_bytes = download_core_resource(state, version_url, 4096, 20).await?;
     let latest = String::from_utf8(version_bytes)
         .map_err(|_| "Mihomo latest version response is not UTF-8".to_owned())?
         .trim()
@@ -1548,7 +1780,8 @@ async fn mobile_core_upgrade(force: bool, state: State<'_, MobileState>) -> Resu
                 to: latest,
             });
         }
-        if let (Some(current), Some(target)) = (release_version_tuple(&installed), release_version_tuple(&latest))
+        if variant == "stable"
+            && let (Some(current), Some(target)) = (release_version_tuple(&installed), release_version_tuple(&latest))
             && current > target
         {
             return Ok(CoreUpgradeReport {
@@ -1559,8 +1792,12 @@ async fn mobile_core_upgrade(force: bool, state: State<'_, MobileState>) -> Resu
         }
     }
 
-    let url = format!("{MIHOMO_RELEASE_DOWNLOAD_BASE}/{latest}/mihomo-android-arm64-v8-{latest}.gz");
-    let package = download_core_resource(&state, &url, MAX_CORE_PACKAGE_BYTES, 300).await?;
+    let url = if variant == "alpha" {
+        format!("{MIHOMO_ALPHA_DOWNLOAD_BASE}/mihomo-android-arm64-v8-{latest}.gz")
+    } else {
+        format!("{MIHOMO_RELEASE_DOWNLOAD_BASE}/{latest}/mihomo-android-arm64-v8-{latest}.gz")
+    };
+    let package = download_core_resource(state, &url, MAX_CORE_PACKAGE_BYTES, 300).await?;
     let staged = stage_online_core(&state.app_data_dir, &package)?;
     let (was_running, was_transparent) = running_core_state(&state).await;
     let request = json!({
@@ -1588,6 +1825,239 @@ async fn mobile_core_upgrade(force: bool, state: State<'_, MobileState>) -> Resu
 }
 
 #[tauri::command]
+async fn mobile_core_upgrade(force: bool, state: State<'_, MobileState>) -> Result<CoreUpgradeReport, String> {
+    let variant = state
+        .mobile_preferences
+        .lock()
+        .map_err(|e| e.to_string())?
+        .core_variant
+        .clone();
+    upgrade_core_variant(&variant, force, &state).await
+}
+
+#[tauri::command]
+async fn mobile_core_variant(state: State<'_, MobileState>) -> Result<CoreVariantStatus, String> {
+    let variant = state
+        .mobile_preferences
+        .lock()
+        .map_err(|e| e.to_string())?
+        .core_variant
+        .clone();
+    Ok(CoreVariantStatus {
+        variant,
+        version: installed_core_version(&state).await.unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+async fn mobile_set_core_variant(variant: String, state: State<'_, MobileState>) -> Result<CoreVariantStatus, String> {
+    let variant = variant.trim().to_ascii_lowercase();
+    if !matches!(variant.as_str(), "stable" | "alpha") {
+        return Err("Invalid Mihomo core variant".into());
+    }
+    let current = state
+        .mobile_preferences
+        .lock()
+        .map_err(|e| e.to_string())?
+        .core_variant
+        .clone();
+    if current != variant {
+        upgrade_core_variant(&variant, true, &state).await?;
+        let mut preferences = state.mobile_preferences.lock().map_err(|e| e.to_string())?.clone();
+        preferences.core_variant = variant.clone();
+        persist_mobile_preferences(&state.mobile_preferences_path, &preferences)?;
+        *state.mobile_preferences.lock().map_err(|e| e.to_string())? = preferences;
+    }
+    Ok(CoreVariantStatus {
+        variant,
+        version: installed_core_version(&state).await.unwrap_or_default(),
+    })
+}
+
+fn android_release_version(tag: &str) -> Option<Version> {
+    Version::parse(tag.trim().strip_prefix("android-v")?).ok()
+}
+
+#[tauri::command]
+fn mobile_app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
+async fn mobile_check_app_update(
+    app: AppHandle,
+    state: State<'_, MobileState>,
+) -> Result<Option<AppUpdateInfo>, String> {
+    let current_version = app.package_info().version.to_string();
+    let current = Version::parse(&current_version)
+        .map_err(|e| format!("Invalid installed app version {current_version}: {e}"))?;
+    let releases = state
+        .client
+        .get(APP_RELEASES_URL)
+        .header("User-Agent", "ClashVerge4Android-Updater")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("App update check failed: {}", e.without_url()))?
+        .error_for_status()
+        .map_err(|e| format!("App update HTTP error: {}", e.without_url()))?
+        .json::<Vec<GithubRelease>>()
+        .await
+        .map_err(|e| format!("Invalid app update response: {e}"))?;
+
+    let mut best: Option<(Version, AppUpdateInfo)> = None;
+    for release in releases {
+        if release.draft {
+            continue;
+        }
+        let Some(version) = android_release_version(&release.tag_name) else {
+            continue;
+        };
+        if version <= current {
+            continue;
+        }
+        let Some(asset) = release
+            .assets
+            .into_iter()
+            .find(|asset| asset.name.to_ascii_lowercase().ends_with(".apk"))
+        else {
+            continue;
+        };
+        if asset.size == 0 || asset.size > MAX_APP_PACKAGE_BYTES {
+            continue;
+        }
+        if !asset.browser_download_url.starts_with(APP_RELEASE_ASSET_PREFIX) {
+            continue;
+        }
+        let info = AppUpdateInfo {
+            current_version: current_version.clone(),
+            version: version.to_string(),
+            tag_name: release.tag_name,
+            body: release.body.unwrap_or_default(),
+            html_url: release.html_url,
+            asset_url: asset.browser_download_url,
+            asset_name: asset.name,
+            asset_size: asset.size,
+            published_at: release.published_at.unwrap_or_default(),
+        };
+        if best.as_ref().is_none_or(|(candidate, _)| version > *candidate) {
+            best = Some((version, info));
+        }
+    }
+    Ok(best.map(|(_, info)| info))
+}
+
+#[tauri::command]
+fn mobile_app_update_progress(state: State<'_, MobileState>) -> Result<AppUpdateProgress, String> {
+    Ok(state.app_update_progress.lock().map_err(|e| e.to_string())?.clone())
+}
+
+#[tauri::command]
+async fn mobile_download_app_update(
+    asset_url: String,
+    expected_size: u64,
+    app: AppHandle,
+    state: State<'_, MobileState>,
+) -> Result<(), String> {
+    if !asset_url.starts_with(APP_RELEASE_ASSET_PREFIX) {
+        return Err("Invalid app update asset URL".into());
+    }
+    if expected_size == 0 || expected_size > MAX_APP_PACKAGE_BYTES {
+        return Err("Invalid app update package size".into());
+    }
+    {
+        let mut progress = state.app_update_progress.lock().map_err(|e| e.to_string())?;
+        if progress.active {
+            return Err("App update download is already running".into());
+        }
+        *progress = AppUpdateProgress {
+            active: true,
+            downloaded: 0,
+            total: expected_size,
+        };
+    }
+
+    let result = async {
+        let mut response = state
+            .client
+            .get(&asset_url)
+            .header("User-Agent", "ClashVerge4Android-Updater")
+            .send()
+            .await
+            .map_err(|e| format!("App update download failed: {}", e.without_url()))?
+            .error_for_status()
+            .map_err(|e| format!("App update download HTTP error: {}", e.without_url()))?;
+        let total = response.content_length().unwrap_or(expected_size);
+        if total == 0 || total > MAX_APP_PACKAGE_BYTES {
+            return Err("App update package is too large".into());
+        }
+        let cache_dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+        fs::create_dir_all(&cache_dir).map_err(|e| format!("create app cache directory: {e}"))?;
+        let final_path = cache_dir.join("cv4a-update.apk");
+        let temporary = cache_dir.join("cv4a-update.apk.download");
+        let _ = fs::remove_file(&temporary);
+        let mut file = fs::File::create(&temporary).map_err(|e| format!("create app update package: {e}"))?;
+        let mut downloaded = 0u64;
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            downloaded = downloaded
+                .checked_add(chunk.len() as u64)
+                .ok_or("App update package size overflow")?;
+            if downloaded > MAX_APP_PACKAGE_BYTES {
+                let _ = fs::remove_file(&temporary);
+                return Err("App update package is too large".into());
+            }
+            file.write_all(&chunk)
+                .map_err(|e| format!("write app update package: {e}"))?;
+            let mut progress = state.app_update_progress.lock().map_err(|e| e.to_string())?;
+            progress.downloaded = downloaded;
+            progress.total = total;
+        }
+        if downloaded == 0 || (expected_size > 0 && downloaded != expected_size) {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!(
+                "App update package size mismatch: downloaded {downloaded}, expected {expected_size}"
+            ));
+        }
+        file.sync_all().map_err(|e| format!("sync app update package: {e}"))?;
+        let _ = fs::remove_file(&final_path);
+        fs::rename(&temporary, &final_path).map_err(|e| format!("publish app update package: {e}"))?;
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Ok(mut progress) = state.app_update_progress.lock() {
+        progress.active = false;
+        if result.is_err() {
+            progress.downloaded = 0;
+            progress.total = 0;
+        }
+    }
+    result
+}
+
+#[tauri::command]
+fn mobile_install_app_update(app: AppHandle, vpn: State<'_, AndroidVpn>) -> Result<(), String> {
+    let apk = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("cv4a-update.apk");
+    if !apk.is_file() {
+        return Err("Downloaded app update package is missing".into());
+    }
+    vpn.install_apk(apk.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn mobile_open_external_url(url: String, vpn: State<'_, AndroidVpn>) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url.trim()).map_err(|e| e.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Invalid external URL".into());
+    }
+    vpn.open_url(parsed.to_string())
+}
+
+#[tauri::command]
 fn mobile_create_local_backup(state: State<'_, MobileState>) -> Result<LocalBackupInfo, String> {
     create_local_backup_internal(&state, None)
 }
@@ -1595,6 +2065,8 @@ fn mobile_create_local_backup(state: State<'_, MobileState>) -> Result<LocalBack
 fn snapshot_mobile_backup(state: &MobileState) -> Result<MobileBackup, String> {
     let profiles = state.store.lock().map_err(|e| e.to_string())?.document();
     let runtime_overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
+    let mobile_preferences = state.mobile_preferences.lock().map_err(|e| e.to_string())?.clone();
+    let backup_settings = state.backup_settings.lock().map_err(|e| e.to_string())?.clone();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?;
@@ -1603,6 +2075,12 @@ fn snapshot_mobile_backup(state: &MobileState) -> Result<MobileBackup, String> {
         created_at: now.as_secs(),
         profiles,
         runtime_overrides,
+        mobile_preferences: Some(mobile_preferences),
+        backup_preferences: Some(BackupPreferencesSnapshot {
+            auto_schedule_enabled: backup_settings.auto_schedule_enabled,
+            auto_interval_hours: backup_settings.auto_interval_hours,
+            auto_on_change: backup_settings.auto_on_change,
+        }),
     };
     validate_mobile_backup(&backup)?;
     Ok(backup)
@@ -1912,6 +2390,8 @@ async fn apply_mobile_backup(state: &MobileState, backup: MobileBackup) -> Resul
     validate_mobile_backup(&backup)?;
     let before_profiles = state.store.lock().map_err(|e| e.to_string())?.document();
     let before_overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
+    let before_mobile_preferences = state.mobile_preferences.lock().map_err(|e| e.to_string())?.clone();
+    let before_backup_settings = state.backup_settings.lock().map_err(|e| e.to_string())?.clone();
     let (was_running, was_transparent) = running_core_state(&state).await;
 
     state
@@ -1928,6 +2408,39 @@ async fn apply_mobile_backup(state: &MobileState, backup: MobileBackup) -> Resul
         return Err(format!("restore runtime preferences: {error}"));
     }
     *state.runtime_overrides.lock().map_err(|e| e.to_string())? = backup.runtime_overrides.clone();
+    if let Some(preferences) = backup.mobile_preferences.clone() {
+        let preferences = preferences.normalized()?;
+        if let Err(error) = persist_mobile_preferences(&state.mobile_preferences_path, &preferences) {
+            let _ = state
+                .store
+                .lock()
+                .map_err(|e| e.to_string())?
+                .restore(before_profiles.clone());
+            let _ = persist_runtime_overrides(&state.runtime_overrides_path, &before_overrides);
+            *state.runtime_overrides.lock().map_err(|e| e.to_string())? = before_overrides.clone();
+            return Err(format!("restore mobile preferences: {error}"));
+        }
+        *state.mobile_preferences.lock().map_err(|e| e.to_string())? = preferences;
+    }
+    if let Some(snapshot) = backup.backup_preferences.as_ref() {
+        let mut settings = before_backup_settings.clone();
+        settings.auto_schedule_enabled = snapshot.auto_schedule_enabled;
+        settings.auto_interval_hours = snapshot.auto_interval_hours;
+        settings.auto_on_change = snapshot.auto_on_change;
+        if let Err(error) = persist_backup_settings(&state.backup_settings_path, &settings) {
+            let _ = persist_mobile_preferences(&state.mobile_preferences_path, &before_mobile_preferences);
+            *state.mobile_preferences.lock().map_err(|e| e.to_string())? = before_mobile_preferences.clone();
+            let _ = state
+                .store
+                .lock()
+                .map_err(|e| e.to_string())?
+                .restore(before_profiles.clone());
+            let _ = persist_runtime_overrides(&state.runtime_overrides_path, &before_overrides);
+            *state.runtime_overrides.lock().map_err(|e| e.to_string())? = before_overrides.clone();
+            return Err(format!("restore backup preferences: {error}"));
+        }
+        *state.backup_settings.lock().map_err(|e| e.to_string())? = settings;
+    }
 
     let apply_result = async {
         if was_running {
@@ -1959,6 +2472,10 @@ async fn apply_mobile_backup(state: &MobileState, backup: MobileBackup) -> Resul
             .restore(before_profiles.clone());
         let _ = persist_runtime_overrides(&state.runtime_overrides_path, &before_overrides);
         *state.runtime_overrides.lock().map_err(|e| e.to_string())? = before_overrides;
+        let _ = persist_mobile_preferences(&state.mobile_preferences_path, &before_mobile_preferences);
+        *state.mobile_preferences.lock().map_err(|e| e.to_string())? = before_mobile_preferences;
+        let _ = persist_backup_settings(&state.backup_settings_path, &before_backup_settings);
+        *state.backup_settings.lock().map_err(|e| e.to_string())? = before_backup_settings;
         if was_running && before_profiles.active_id.is_some() {
             let _ = start_active_core(&state, was_transparent).await;
             if was_transparent {
@@ -2000,7 +2517,10 @@ async fn mobile_set_boot_module(enable: bool, state: State<'_, MobileState>) -> 
 }
 
 #[tauri::command]
-async fn mobile_bootstrap_runtime(state: State<'_, MobileState>) -> Result<RuntimeStatus, String> {
+async fn mobile_bootstrap_runtime(
+    state: State<'_, MobileState>,
+    vpn: State<'_, AndroidVpn>,
+) -> Result<RuntimeStatus, String> {
     // Preserve a core that was upgraded online to a newer release. Bootstrap
     // should refresh the agent/geodata and repair an absent/older core, but it
     // must not silently downgrade a newer Mihomo back to the APK-bundled one.
@@ -2084,6 +2604,8 @@ async fn mobile_bootstrap_runtime(state: State<'_, MobileState>) -> Result<Runti
     }
     for _ in 0..50 {
         if call_agent(&state.agent_socket, json!({ "op": "status" })).await.is_ok() {
+            let vpn = vpn.inner().clone();
+            run_vpn_plugin(move || vpn.set_tun_tile_registered(true)).await?;
             return Ok(runtime_status(&state).await);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2226,20 +2748,114 @@ async fn mobile_set_runtime_preferences(
     mobile_runtime_preferences(state).await
 }
 
+fn validate_dns_override_settings(settings: &DnsOverrideSettings) -> Result<(), String> {
+    if !settings.enabled {
+        return Ok(());
+    }
+    let yaml = settings.yaml.trim();
+    if yaml.is_empty() {
+        return Err("DNS override is enabled but empty".into());
+    }
+    if yaml.len() > 256 * 1024 {
+        return Err("DNS override exceeds 256 KiB".into());
+    }
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(yaml).map_err(|e| format!("DNS override YAML: {e}"))?;
+    let mapping = value.as_mapping().ok_or("DNS override must be a YAML mapping")?;
+    for (key, value) in mapping {
+        let Some(key) = key.as_str() else {
+            return Err("DNS override keys must be strings".into());
+        };
+        if !matches!(key, "dns" | "hosts") {
+            return Err(format!("DNS override may only contain dns/hosts, found: {key}"));
+        }
+        if !value.is_mapping() {
+            return Err(format!("DNS override {key} must be a mapping"));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
-fn mobile_dns_override(state: State<'_, MobileState>) -> Result<DnsOverrideSettings, String> {
-    let overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?;
+fn mobile_dns_override(
+    profile_id: Option<String>,
+    state: State<'_, MobileState>,
+) -> Result<DnsOverrideSettings, String> {
+    let overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
+    if let Some(profile_id) = profile_id {
+        let document = state.store.lock().map_err(|e| e.to_string())?.document();
+        let profile = document
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .ok_or("Profile not found")?;
+        if profile.dns_override_enabled.is_some() || profile.dns_override_yaml.is_some() {
+            return Ok(DnsOverrideSettings {
+                enabled: profile.dns_override_enabled.unwrap_or(false),
+                yaml: profile.dns_override_yaml.clone().unwrap_or_default(),
+            });
+        }
+    }
     Ok(DnsOverrideSettings {
         enabled: overrides.dns_override_enabled.unwrap_or(false),
-        yaml: overrides.dns_override_yaml.clone().unwrap_or_default(),
+        yaml: overrides.dns_override_yaml.unwrap_or_default(),
     })
 }
 
 #[tauri::command]
 async fn mobile_set_dns_override(
+    profile_id: Option<String>,
     settings: DnsOverrideSettings,
     state: State<'_, MobileState>,
 ) -> Result<DnsOverrideSettings, String> {
+    validate_dns_override_settings(&settings)?;
+    if let Some(profile_id) = profile_id {
+        let before_document = state.store.lock().map_err(|e| e.to_string())?.document();
+        let is_active = before_document.active_id.as_deref() == Some(profile_id.as_str());
+        state
+            .store
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_profile_dns_override(&profile_id, Some(settings.enabled), Some(settings.yaml.clone()))?;
+        if !is_active {
+            return Ok(settings);
+        }
+        let source = active_yaml(&state)?;
+        let (was_running, was_transparent) = running_core_state(&state).await;
+        let overrides = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
+        let preview_yaml = match render_runtime_config(&state, &source, &overrides, was_transparent || was_running) {
+            Ok(yaml) => yaml,
+            Err(error) => {
+                let _ = state.store.lock().map_err(|e| e.to_string())?.restore(before_document);
+                return Err(error);
+            }
+        };
+        let apply_result = async {
+            if was_running {
+                start_source_core(&state, &source, was_transparent).await?;
+                if was_transparent {
+                    wait_for_tun_stable(&state).await?;
+                }
+            } else if call_agent(&state.agent_socket, json!({ "op": "status" })).await.is_ok() {
+                call_agent(
+                    &state.agent_socket,
+                    json!({ "op": "apply_config", "yaml": preview_yaml }),
+                )
+                .await?;
+            }
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = apply_result {
+            let _ = state.store.lock().map_err(|e| e.to_string())?.restore(before_document);
+            if was_running {
+                let _ = start_source_core(&state, &source, was_transparent).await;
+            }
+            return Err(format!(
+                "Failed to apply DNS override; previous DNS settings restored: {error}"
+            ));
+        }
+        return Ok(settings);
+    }
     let before = state.runtime_overrides.lock().map_err(|e| e.to_string())?.clone();
     let mut next = before.clone();
     next.dns_override_enabled = Some(settings.enabled);
@@ -2455,7 +3071,9 @@ fn tun_preferences_from_overrides(overrides: &RuntimeOverrides) -> cv4a_mihomo_c
     cv4a_mihomo_client::TunPreferences {
         stack: overrides.tun_stack.clone().unwrap_or_else(|| "mixed".into()),
         strict_route: overrides.tun_strict_route.unwrap_or(true),
-        auto_detect_interface: overrides.tun_auto_detect_interface.unwrap_or(true),
+        // Android root TUN must keep interface auto-detection disabled: Mihomo can
+        // otherwise choose the app's VpnService tun0 as its own outbound path.
+        auto_detect_interface: false,
         dns_hijack: overrides
             .tun_dns_hijack
             .clone()
@@ -2475,6 +3093,7 @@ async fn mobile_set_tun_preferences(
     mut preferences: cv4a_mihomo_client::TunPreferences,
     state: State<'_, MobileState>,
 ) -> Result<cv4a_mihomo_client::TunPreferences, String> {
+    preferences.auto_detect_interface = false;
     preferences.stack = preferences.stack.trim().to_ascii_lowercase();
     if !matches!(preferences.stack.as_str(), "system" | "gvisor" | "mixed" | "mips") {
         return Err("Invalid Mihomo TUN stack".into());
@@ -2493,7 +3112,7 @@ async fn mobile_set_tun_preferences(
     let mut next = before.clone();
     next.tun_stack = Some(preferences.stack.clone());
     next.tun_strict_route = Some(preferences.strict_route);
-    next.tun_auto_detect_interface = Some(preferences.auto_detect_interface);
+    next.tun_auto_detect_interface = Some(false);
     next.tun_dns_hijack = Some(preferences.dns_hijack.clone());
     next.tun_mtu = Some(preferences.mtu);
 
@@ -3191,23 +3810,32 @@ async fn mobile_set_system_proxy(
 #[tauri::command]
 async fn mobile_enable_tun(state: State<'_, MobileState>, vpn: State<'_, AndroidVpn>) -> Result<CoreSnapshot, String> {
     let vpn = vpn.inner().clone();
-    start_active_core(&state, true).await?;
+    let set_tun = vpn.clone();
+    let switched = run_vpn_plugin(move || set_tun.set_tun(true)).await?;
+    if !switched.active {
+        return Err("Root TUN controller did not report an active TUN".into());
+    }
     wait_for_tun_stable(&state).await?;
-    if vpn_status(vpn).await.is_ok_and(|status| status.active)
+    if vpn_status(vpn.clone()).await.is_ok_and(|status| status.active)
         && let Err(error) = set_agent_vpn_coexistence(&state, true).await
     {
-        let _ = call_agent(&state.agent_socket, json!({ "op": "stop_core" })).await;
+        let rollback = vpn.clone();
+        let _ = run_vpn_plugin(move || rollback.set_tun(false)).await;
         return Err(format!("Root TUN started but VPN coexistence routing failed: {error}"));
     }
     core_client(&state)?.snapshot().await
 }
 
 #[tauri::command]
-async fn mobile_disable_tun(state: State<'_, MobileState>) -> Result<RuntimeStatus, String> {
-    // Leaving transparent mode must not stop Mihomo altogether. Keep the
-    // controller/core alive with the preview runtime so proxy selection,
-    // delays, connections, and explicit proxy listeners can keep working.
-    start_active_core(&state, false).await?;
+async fn mobile_disable_tun(
+    state: State<'_, MobileState>,
+    vpn: State<'_, AndroidVpn>,
+) -> Result<RuntimeStatus, String> {
+    let set_tun = vpn.inner().clone();
+    let switched = run_vpn_plugin(move || set_tun.set_tun(false)).await?;
+    if switched.active {
+        return Err("Root TUN controller still reports an active TUN".into());
+    }
     for _ in 0..30 {
         let status = runtime_status(&state).await;
         if status.core_running && status.core_connected && !status.transparent_active {
@@ -3224,6 +3852,7 @@ pub fn run() {
         .plugin(crate::android_vpn::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;
             fs::create_dir_all(&app_data_dir)?;
@@ -3269,6 +3898,7 @@ pub fn run() {
                 backup_settings_path,
                 client,
                 auto_update_attempts: Mutex::new(HashMap::new()),
+                app_update_progress: Mutex::new(AppUpdateProgress::default()),
                 agent_socket: run_dir.join("root-agent.sock"),
                 controller_socket: run_dir.join("mihomo.sock"),
                 socket_context,
@@ -3317,6 +3947,14 @@ pub fn run() {
             mobile_stop_preview_core,
             mobile_restart_core,
             mobile_core_upgrade,
+            mobile_core_variant,
+            mobile_set_core_variant,
+            mobile_app_version,
+            mobile_check_app_update,
+            mobile_app_update_progress,
+            mobile_download_app_update,
+            mobile_install_app_update,
+            mobile_open_external_url,
             mobile_create_local_backup,
             mobile_list_local_backups,
             mobile_restore_local_backup,

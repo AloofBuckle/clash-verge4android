@@ -149,6 +149,7 @@ function patchManifest() {
     'android.permission.FOREGROUND_SERVICE',
     'android.permission.FOREGROUND_SERVICE_SPECIAL_USE',
     'android.permission.RECEIVE_BOOT_COMPLETED',
+    'android.permission.REQUEST_INSTALL_PACKAGES',
   ]) {
     if (!text.includes(permission)) {
       text = text.replace(
@@ -164,6 +165,107 @@ function patchManifest() {
   if (!text.includes('android:name=".vpn.Cv4aVpnBootReceiver"')) {
     const receiver = `\n        <receiver\n            android:name=".vpn.Cv4aVpnBootReceiver"\n            android:enabled="true"\n            android:exported="true">\n            <intent-filter>\n                <action android:name="android.intent.action.BOOT_COMPLETED" />\n                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />\n            </intent-filter>\n        </receiver>\n`
     text = text.replace('\n        <provider\n', `${receiver}\n        <provider\n`)
+  }
+  if (!text.includes('android:name=".vpn.Cv4aVpnTileService"')) {
+    const tiles = `\n        <service\n            android:name=".vpn.Cv4aVpnTileService"\n            android:label="@string/qs_system_proxy"\n            android:icon="@drawable/ic_qs_system_proxy"\n            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"\n            android:enabled="true"\n            android:exported="true">\n            <intent-filter>\n                <action android:name="android.service.quicksettings.action.QS_TILE" />\n            </intent-filter>\n            <meta-data\n                android:name="android.service.quicksettings.TOGGLEABLE_TILE"\n                android:value="true" />\n        </service>\n\n        <service\n            android:name=".vpn.Cv4aTunTileService"\n            android:label="@string/qs_tun_mode"\n            android:icon="@drawable/ic_qs_tun"\n            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"\n            android:enabled="true"\n            android:exported="true">\n            <intent-filter>\n                <action android:name="android.service.quicksettings.action.QS_TILE" />\n            </intent-filter>\n            <meta-data\n                android:name="android.service.quicksettings.TOGGLEABLE_TILE"\n                android:value="true" />\n        </service>\n`
+    text = text.replace('\n        <provider\n', `${tiles}\n        <provider\n`)
+  }
+  {
+    const serviceName = '.vpn.Cv4aTunTileService'
+    const serviceStart = text.indexOf(`android:name="${serviceName}"`)
+    if (serviceStart >= 0) {
+      const serviceEnd = text.indexOf('</service>', serviceStart)
+      if (serviceEnd >= 0) {
+        const serviceBlock = text.slice(serviceStart, serviceEnd)
+        const disabledBlock = serviceBlock.replace(
+          'android:enabled="true"',
+          'android:enabled="false"',
+        )
+        text = `${text.slice(0, serviceStart)}${disabledBlock}${text.slice(serviceEnd)}`
+      }
+    }
+  }
+  for (const serviceName of [
+    '.vpn.Cv4aVpnTileService',
+    '.vpn.Cv4aTunTileService',
+  ]) {
+    const serviceStart = text.indexOf(`android:name="${serviceName}"`)
+    if (serviceStart < 0) continue
+    const serviceEnd = text.indexOf('</service>', serviceStart)
+    if (serviceEnd < 0) continue
+    const serviceBlock = text.slice(serviceStart, serviceEnd)
+    if (serviceBlock.includes('android.service.quicksettings.ACTIVE_TILE')) continue
+    const toggleMeta = `            <meta-data\n                android:name="android.service.quicksettings.TOGGLEABLE_TILE"\n                android:value="true" />`
+    const activeMeta = `${toggleMeta}\n            <meta-data\n                android:name="android.service.quicksettings.ACTIVE_TILE"\n                android:value="true" />`
+    const blockWithActive = serviceBlock.replace(toggleMeta, activeMeta)
+    if (blockWithActive === serviceBlock) {
+      throw new Error(`Unable to enable active Quick Settings tile for ${serviceName}`)
+    }
+    text = `${text.slice(0, serviceStart)}${blockWithActive}${text.slice(serviceEnd)}`
+  }
+  writeFileSync(file, text)
+}
+
+function patchStrings() {
+  const file = path.join(generatedApp, 'src/main/res/values/strings.xml')
+  let text = readFileSync(file, 'utf8')
+  for (const [name, value] of [
+    ['qs_system_proxy', '系统代理'],
+    ['qs_tun_mode', '虚拟网卡模式'],
+  ]) {
+    if (!text.includes(`name="${name}"`)) {
+      text = text.replace('</resources>', `    <string name="${name}">${value}</string>\n</resources>`)
+    }
+  }
+  writeFileSync(file, text)
+}
+
+function patchMainActivity() {
+  const file = path.join(
+    generatedApp,
+    'src/main/java/io/github/aloofbuckle/cv4android/MainActivity.kt',
+  )
+  if (!existsSync(file)) return
+  let text = readFileSync(file, 'utf8')
+  if (!text.includes('import android.content.BroadcastReceiver')) {
+    text = text.replace(
+      'import android.content.res.Configuration\n',
+      'import android.content.BroadcastReceiver\nimport android.content.Context\nimport android.content.Intent\nimport android.content.IntentFilter\nimport android.content.res.Configuration\n',
+    )
+  }
+  if (!text.includes('import androidx.core.content.ContextCompat')) {
+    text = text.replace(
+      'import androidx.activity.enableEdgeToEdge\n',
+      'import androidx.activity.enableEdgeToEdge\nimport androidx.core.content.ContextCompat\n',
+    )
+  }
+  if (!text.includes('private val nativeStateReceiver = object : BroadcastReceiver()')) {
+    text = text.replace(
+      '  private var appWebView: WebView? = null\n',
+      `  private var appWebView: WebView? = null\n  private val nativeStateReceiver = object : BroadcastReceiver() {\n    override fun onReceive(context: Context?, intent: Intent?) {\n      if (intent?.action == Cv4aTileSupport.ACTION_STATE_CHANGED) {\n        dispatchWebEvent("cv4a-native-state")\n      }\n    }\n  }\n`,
+    )
+  }
+  if (!text.includes('ContextCompat.registerReceiver(')) {
+    text = text.replace(
+      '    super.onCreate(savedInstanceState)\n',
+      `    super.onCreate(savedInstanceState)\n    ContextCompat.registerReceiver(\n      this,\n      nativeStateReceiver,\n      IntentFilter(Cv4aTileSupport.ACTION_STATE_CHANGED),\n      ContextCompat.RECEIVER_NOT_EXPORTED,\n    )\n`,
+    )
+  }
+  text = text.replace(
+    `      Cv4aTileSupport.notifyStateChanged(this)\n      appWebView?.post {\n        appWebView?.evaluateJavascript(\n          "window.dispatchEvent(new Event('cv4a-native-focus'))",\n          null,\n        )\n      }`,
+    `      Cv4aTileSupport.requestTileUpdates(this)\n      dispatchWebEvent("cv4a-native-focus")`,
+  )
+  if (!text.includes('unregisterReceiver(nativeStateReceiver)')) {
+    text = text.replace(
+      '  override fun onDestroy() {\n',
+      '  override fun onDestroy() {\n    unregisterReceiver(nativeStateReceiver)\n',
+    )
+  }
+  if (!text.includes('private fun dispatchWebEvent(name: String)')) {
+    text = text.replace(
+      '  private fun updateSystemBars() {\n',
+      `  private fun dispatchWebEvent(name: String) {\n    appWebView?.post {\n      appWebView?.evaluateJavascript(\n        "window.dispatchEvent(new Event('$name'))",\n        null,\n      )\n    }\n  }\n\n  private fun updateSystemBars() {\n`,
+    )
   }
   writeFileSync(file, text)
 }
@@ -181,6 +283,12 @@ export function prepareAndroidVpn({ ndk, java }) {
   )
   mkdirSync(targetDir, { recursive: true })
   cpSync(sourceDir, targetDir, { recursive: true, force: true })
+  cpSync(path.resolve('packaging/android/vpn/res'), path.join(generatedApp, 'src/main/res'), {
+    recursive: true,
+    force: true,
+  })
+  patchMainActivity()
   patchGradle()
   patchManifest()
+  patchStrings()
 }

@@ -1,9 +1,17 @@
-import { invoke, isTauri } from '@tauri-apps/api/core'
+import { addPluginListener, invoke, isTauri } from '@tauri-apps/api/core'
 
 export interface Profile {
   id: string
   name: string
+  description?: string | null
   source: string | null
+  home?: string | null
+  extra?: {
+    upload: number
+    download: number
+    total: number
+    expire: number
+  } | null
   yaml: string
   updatedAt: number
   selected: { group: string; member: string }[]
@@ -90,6 +98,26 @@ export interface CoreUpgradeReport {
   upgraded: boolean
   from: string
   to: string
+}
+export interface CoreVariantStatus {
+  variant: 'stable' | 'alpha' | string
+  version: string
+}
+export interface AppUpdateInfo {
+  currentVersion: string
+  version: string
+  tagName: string
+  body: string
+  htmlUrl: string
+  assetUrl: string
+  assetName: string
+  assetSize: number
+  publishedAt: string
+}
+export interface AppUpdateProgress {
+  active: boolean
+  downloaded: number
+  total: number
 }
 export interface LocalBackupInfo {
   filename: string
@@ -209,10 +237,25 @@ export interface RuntimePreferences {
 }
 export interface MobilePreferences {
   autoCloseConnection: boolean
+  autoCheckUpdate: boolean
   defaultLatencyTest: string
   defaultLatencyTimeout: number
   enableAutoDelayDetection: boolean
   autoDelayDetectionIntervalMinutes: number
+  language: string
+  themeMode: 'light' | 'dark' | 'system'
+  homeCards: {
+    profile: boolean
+    proxy: boolean
+    network: boolean
+    mode: boolean
+    traffic: boolean
+    clashInfo: boolean
+    systemInfo: boolean
+    tests: boolean
+    ip: boolean
+  }
+  coreVariant: 'stable' | 'alpha'
   startPage:
     | 'home'
     | 'proxies'
@@ -247,8 +290,12 @@ export const api = {
     invoke<ProfileDocument>('mobile_import', { name, yaml }),
   importNodes: (name: string, links: string) =>
     invoke<ProfileDocument>('mobile_import_nodes', { name, links }),
-  subscribe: (name: string, url: string, option?: ProfileOptions) =>
-    invoke<ProfileDocument>('mobile_subscribe', { name, url, option }),
+  subscribe: (
+    name: string,
+    description: string | null,
+    url: string,
+    option?: ProfileOptions,
+  ) => invoke<ProfileDocument>('mobile_subscribe', { name, description, url, option }),
   activate: (id: string) => invoke<ProfileDocument>('mobile_activate', { id }),
   remove: (id: string) => invoke<ProfileDocument>('mobile_delete', { id }),
   removeMany: (ids: string[]) =>
@@ -256,6 +303,7 @@ export const api = {
   updateProfile: (
     id: string,
     name: string,
+    description: string | null,
     yaml: string,
     expectedYaml: string,
     source?: string | null,
@@ -264,6 +312,7 @@ export const api = {
     invoke<ProfileDocument>('mobile_update_profile', {
       id,
       name,
+      description,
       yaml,
       expectedYaml,
       source,
@@ -316,6 +365,18 @@ export const api = {
   restartCore: () => invoke<CoreSnapshot>('mobile_restart_core'),
   upgradeCore: (force = false) =>
     invoke<CoreUpgradeReport>('mobile_core_upgrade', { force }),
+  coreVariant: () => invoke<CoreVariantStatus>('mobile_core_variant'),
+  setCoreVariant: (variant: 'stable' | 'alpha') =>
+    invoke<CoreVariantStatus>('mobile_set_core_variant', { variant }),
+  appVersion: () => invoke<string>('mobile_app_version'),
+  checkAppUpdate: () => invoke<AppUpdateInfo | null>('mobile_check_app_update'),
+  appUpdateProgress: () =>
+    invoke<AppUpdateProgress>('mobile_app_update_progress'),
+  downloadAppUpdate: (assetUrl: string, expectedSize: number) =>
+    invoke<void>('mobile_download_app_update', { assetUrl, expectedSize }),
+  installAppUpdate: () => invoke<void>('mobile_install_app_update'),
+  openExternalUrl: (url: string) =>
+    invoke<void>('mobile_open_external_url', { url }),
   createLocalBackup: () =>
     invoke<LocalBackupInfo>('mobile_create_local_backup'),
   listLocalBackups: () =>
@@ -350,9 +411,15 @@ export const api = {
   preferences: () => invoke<MobilePreferences>('mobile_preferences'),
   setPreferences: (preferences: MobilePreferences) =>
     invoke<MobilePreferences>('mobile_set_preferences', { preferences }),
-  dnsOverride: () => invoke<DnsOverrideSettings>('mobile_dns_override'),
-  setDnsOverride: (settings: DnsOverrideSettings) =>
-    invoke<DnsOverrideSettings>('mobile_set_dns_override', { settings }),
+  dnsOverride: (profileId?: string | null) =>
+    invoke<DnsOverrideSettings>('mobile_dns_override', {
+      profileId: profileId ?? null,
+    }),
+  setDnsOverride: (settings: DnsOverrideSettings, profileId?: string | null) =>
+    invoke<DnsOverrideSettings>('mobile_set_dns_override', {
+      settings,
+      profileId: profileId ?? null,
+    }),
   portSettings: () => invoke<PortSettings>('mobile_port_settings'),
   setPortSettings: (settings: PortSettings) =>
     invoke<PortSettings>('mobile_set_port_settings', { settings }),
@@ -398,4 +465,14 @@ export const api = {
   clearLogs: () => invoke<void>('mobile_clear_logs'),
   enableTun: () => invoke<CoreSnapshot>('mobile_enable_tun'),
   disableTun: () => invoke<RuntimeStatus>('mobile_disable_tun'),
+  onNativeStateChanged: async (callback: () => void) => {
+    const listener = await addPluginListener<{ source: string }>(
+      'cv4a-vpn',
+      'stateChanged',
+      () => callback(),
+    )
+    return () => {
+      void listener.unregister()
+    }
+  },
 }

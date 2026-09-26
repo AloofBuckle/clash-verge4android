@@ -21,6 +21,12 @@ pub struct AndroidVpnStatus {
     pub bridge_abi: i32,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AndroidTunStatus {
+    pub active: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AndroidVpnStart {
@@ -38,6 +44,28 @@ impl AndroidVpn {
             .map_err(|error| error.to_string())
     }
 
+    pub fn set_tun(&self, enable: bool) -> Result<AndroidTunStatus, String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SetTunArgs {
+            enable: bool,
+        }
+        self.0
+            .run_mobile_plugin("setTun", SetTunArgs { enable })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn set_tun_tile_registered(&self, registered: bool) -> Result<(), String> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SetTunTileRegisteredArgs {
+            registered: bool,
+        }
+        self.0
+            .run_mobile_plugin("setTunTileRegistered", SetTunTileRegisteredArgs { registered })
+            .map_err(|error| error.to_string())
+    }
+
     pub fn start(&self, args: AndroidVpnStart) -> Result<AndroidVpnStatus, String> {
         self.0
             .run_mobile_plugin("start", args)
@@ -46,6 +74,26 @@ impl AndroidVpn {
 
     pub fn stop(&self) -> Result<AndroidVpnStatus, String> {
         self.0.run_mobile_plugin("stop", ()).map_err(|error| error.to_string())
+    }
+
+    pub fn install_apk(&self, path: String) -> Result<(), String> {
+        #[derive(Serialize)]
+        struct InstallArgs {
+            path: String,
+        }
+        self.0
+            .run_mobile_plugin("installApk", InstallArgs { path })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn open_url(&self, url: String) -> Result<(), String> {
+        #[derive(Serialize)]
+        struct OpenUrlArgs {
+            url: String,
+        }
+        self.0
+            .run_mobile_plugin("openUrl", OpenUrlArgs { url })
+            .map_err(|error| error.to_string())
     }
 }
 

@@ -255,13 +255,13 @@ class Cv4aVpnService : VpnService() {
         if (!socketPath.exists()) return
         runCatching {
             LocalSocket().use { socket ->
-                socket.soTimeout = 2_000
                 socket.connect(
                     LocalSocketAddress(
                         socketPath.absolutePath,
                         LocalSocketAddress.Namespace.FILESYSTEM,
                     ),
                 )
+                socket.soTimeout = 2_000
                 val request = "{\"op\":\"set_vpn_coexistence\",\"enable\":$enable}\n"
                 socket.outputStream.write(request.toByteArray(Charsets.UTF_8))
                 socket.outputStream.flush()
@@ -354,5 +354,6 @@ class Cv4aVpnService : VpnService() {
 
     private fun publish(next: State) {
         Companion.publish(next)
+        Cv4aTileSupport.notifyStateChanged(this)
     }
 }

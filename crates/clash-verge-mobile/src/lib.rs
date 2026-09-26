@@ -19,7 +19,13 @@ pub const MAX_PROFILE_BYTES: usize = 4 * 1024 * 1024;
 pub struct Profile {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub source: Option<String>,
+    #[serde(default)]
+    pub home: Option<String>,
+    #[serde(default)]
+    pub extra: Option<ProfileExtra>,
     pub yaml: String,
     pub updated_at: u64,
     #[serde(default)]
@@ -38,6 +44,19 @@ pub struct Profile {
     pub groups_yaml: Option<String>,
     #[serde(default)]
     pub script_js: Option<String>,
+    #[serde(default)]
+    pub dns_override_enabled: Option<bool>,
+    #[serde(default)]
+    pub dns_override_yaml: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileExtra {
+    pub upload: u64,
+    pub download: u64,
+    pub total: u64,
+    pub expire: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -900,10 +919,11 @@ pub fn runtime_tun_config_with_enhancements(
     map.insert(Value::String("allow-lan".into()), Value::Bool(false));
     apply_runtime_overrides(map, overrides)?;
     apply_proxy_chain(map, chain)?;
-    // Android VpnService marks protected sockets with 0x20000. Apply the same
-    // mark to the root Mihomo process so its own outbound sockets bypass any
-    // active Android VPN instead of being captured by that VPN's tun0.
-    map.insert(Value::String("routing-mark".into()), Value::Number(131_072.into()));
+    // Keep Android's PROTECT_FROM_VPN bit (0x20000) and add a CV4A-private
+    // high bit. The root agent bypasses the TUN only for the private bit, so
+    // Android system traffic that independently uses 0x20000 still reaches
+    // Mihomo while Mihomo's own outbound sockets continue through netd.
+    map.insert(Value::String("routing-mark".into()), Value::Number(537_001_984.into()));
 
     let mut tun = serde_yaml_ng::Mapping::new();
     tun.insert(Value::String("enable".into()), Value::Bool(true));
@@ -1028,6 +1048,19 @@ impl Store {
         source: Option<String>,
         option: ProfileOptions,
     ) -> Result<Document, String> {
+        self.import_with_metadata(name, yaml, source, option, None, None, None)
+    }
+
+    pub fn import_with_metadata(
+        &mut self,
+        name: String,
+        yaml: String,
+        source: Option<String>,
+        option: ProfileOptions,
+        description: Option<String>,
+        home: Option<String>,
+        extra: Option<ProfileExtra>,
+    ) -> Result<Document, String> {
         inspect(&yaml)?;
         let option = option.normalized()?;
         let name = name.trim().to_owned();
@@ -1042,8 +1075,13 @@ impl Store {
         next.profiles.push(Profile {
             id: id.clone(),
             name,
+            description: description
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty()),
             yaml,
             source,
+            home,
+            extra,
             updated_at: now.as_secs(),
             selected: Vec::new(),
             proxy_chain: None,
@@ -1053,6 +1091,8 @@ impl Store {
             proxies_yaml: None,
             groups_yaml: None,
             script_js: None,
+            dns_override_enabled: None,
+            dns_override_yaml: None,
         });
         if next.active_id.is_none() {
             next.active_id = Some(id);
@@ -1223,7 +1263,35 @@ impl Store {
         self.commit(next)
     }
 
+    pub fn set_profile_dns_override(
+        &mut self,
+        id: &str,
+        enabled: Option<bool>,
+        yaml: Option<String>,
+    ) -> Result<Document, String> {
+        let mut next = self.document();
+        let profile = next
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .ok_or("Profile not found")?;
+        profile.dns_override_enabled = enabled;
+        profile.dns_override_yaml = yaml;
+        self.commit(next)
+    }
+
     pub fn replace(&mut self, id: &str, yaml: String, expected: &str) -> Result<Document, String> {
+        self.replace_with_metadata(id, yaml, expected, None, None)
+    }
+
+    pub fn replace_with_metadata(
+        &mut self,
+        id: &str,
+        yaml: String,
+        expected: &str,
+        home: Option<String>,
+        extra: Option<ProfileExtra>,
+    ) -> Result<Document, String> {
         inspect(&yaml)?;
         let mut next = self.document();
         let profile = next
@@ -1235,6 +1303,8 @@ impl Store {
             return Err("Profile changed during the operation; reload and retry".into());
         }
         profile.yaml = yaml;
+        profile.home = home;
+        profile.extra = extra;
         profile.updated_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| e.to_string())?
@@ -1249,7 +1319,15 @@ impl Store {
             .iter()
             .find(|profile| profile.id == id)
             .ok_or("Profile not found")?;
-        self.update_with_options(id, name, yaml, profile.source.clone(), profile.option.clone(), expected)
+        self.update_with_metadata(
+            id,
+            name,
+            yaml,
+            profile.source.clone(),
+            profile.option.clone(),
+            profile.description.clone(),
+            expected,
+        )
     }
 
     pub fn update_with_options(
@@ -1259,6 +1337,25 @@ impl Store {
         yaml: String,
         source: Option<String>,
         option: ProfileOptions,
+        expected: &str,
+    ) -> Result<Document, String> {
+        let description = self
+            .document
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .and_then(|profile| profile.description.clone());
+        self.update_with_metadata(id, name, yaml, source, option, description, expected)
+    }
+
+    pub fn update_with_metadata(
+        &mut self,
+        id: &str,
+        name: String,
+        yaml: String,
+        source: Option<String>,
+        option: ProfileOptions,
+        description: Option<String>,
         expected: &str,
     ) -> Result<Document, String> {
         inspect(&yaml)?;
@@ -1277,6 +1374,9 @@ impl Store {
             return Err("Profile changed during the operation; reload and retry".into());
         }
         profile.name = name;
+        profile.description = description
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         profile.yaml = yaml;
         profile.source = source
             .map(|value| value.trim().to_owned())
@@ -1636,7 +1736,7 @@ mod tests {
         assert_eq!(tun.get("auto-redirect").and_then(Value::as_bool), Some(false));
         assert_eq!(tun.get("auto-detect-interface").and_then(Value::as_bool), Some(false));
         assert_eq!(tun.get("strict-route").and_then(Value::as_bool), Some(true));
-        assert_eq!(root.get("routing-mark").and_then(Value::as_i64), Some(131_072));
+        assert_eq!(root.get("routing-mark").and_then(Value::as_i64), Some(537_001_984));
         let dns = root.get("dns").unwrap();
         assert_eq!(dns.get("enable").and_then(Value::as_bool), Some(true));
         assert!(dns.get("listen").is_none());
