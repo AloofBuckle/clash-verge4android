@@ -252,6 +252,18 @@ const navIcons: Record<Page, ReactNode> = {
   logs: <SubjectOutlined />,
   settings: <SettingsOutlined />,
 }
+
+// MUI keeps Dialog/Menu children mounted while their exit transition runs.
+// If the same nullable state both controls `open` and carries the rendered
+// payload, clearing it on close can make the exiting overlay render a fallback
+// branch for a frame (for example a subscription form briefly becoming YAML).
+// Keep the last real payload for rendering until the overlay has disappeared.
+function useRetainedTransitionValue<T>(value: T | null): T | null {
+  const retained = useRef<T | null>(value)
+  if (value !== null) retained.current = value
+  return value ?? retained.current
+}
+
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -556,6 +568,13 @@ function App() {
   const ruleMatcher = useRef<(content: string) => boolean>(() => true)
   const connectionMatcher = useRef<(content: string) => boolean>(() => true)
   const logMatcher = useRef<(content: string) => boolean>(() => true)
+  const renderedForm = useRetainedTransitionValue(form)
+  const renderedMergeTarget = useRetainedTransitionValue(mergeTarget)
+  const renderedSequenceTarget = useRetainedTransitionValue(sequenceTarget)
+  const renderedScriptTarget = useRetainedTransitionValue(scriptTarget)
+  const renderedProfileMenu = useRetainedTransitionValue(profileMenu)
+  const renderedQrProfile = useRetainedTransitionValue(qrProfile)
+  const renderedAppUpdateInfo = useRetainedTransitionValue(appUpdateInfo)
   const active = doc.profiles.find((p) => p.id === doc.activeId)
   const canEdit = caps.profileManagement && !busy && !loading
   const homeMode = (core?.mode ?? summary?.mode ?? 'rule').toLowerCase()
@@ -1208,12 +1227,7 @@ function App() {
                 form.profile.source ? profileOption : undefined,
               )
           : form.kind === 'subscription'
-            ? await api.subscribe(
-                name.trim(),
-                description.trim() || null,
-                sourceUrl.trim(),
-                profileOption,
-              )
+            ? await api.subscribe(sourceUrl.trim())
             : form.kind === 'nodes'
               ? await api.importNodes(name.trim(), content)
               : await api.import(name.trim(), content)
@@ -3219,15 +3233,15 @@ function App() {
 
                   <Menu
                     open={Boolean(profileMenu)}
-                    anchorEl={profileMenu?.anchor ?? null}
+                    anchorEl={renderedProfileMenu?.anchor ?? null}
                     onClose={() => setProfileMenu(null)}
                     slotProps={{ list: { sx: { py: 0.5 } } }}
                   >
-                    {profileMenu?.profile.home && (
+                    {renderedProfileMenu?.profile.home && (
                       <MenuItem
                         dense
                         onClick={() => {
-                          const profile = profileMenu.profile
+                          const profile = renderedProfileMenu.profile
                           setProfileMenu(null)
                           if (profile.home) void api.openExternalUrl(profile.home)
                         }}
@@ -3237,20 +3251,20 @@ function App() {
                     )}
                     <MenuItem
                       dense
-                      disabled={profileMenu?.profile.id === doc.activeId}
+                      disabled={renderedProfileMenu?.profile.id === doc.activeId}
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) void activateProfile(profile)
                       }}
                     >
                       {zhProfiles.components.menu.select}
                     </MenuItem>
-                    {profileMenu?.profile.source && (
+                    {renderedProfileMenu?.profile.source && (
                       <MenuItem
                         dense
                         onClick={() => {
-                          const profile = profileMenu.profile
+                          const profile = renderedProfileMenu.profile
                           setProfileMenu(null)
                           setQrProfile(profile)
                         }}
@@ -3258,11 +3272,11 @@ function App() {
                         {zhProfiles.components.menu.shareQrCode}
                       </MenuItem>
                     )}
-                    {profileMenu?.profile.source && (
+                    {renderedProfileMenu?.profile.source && (
                       <MenuItem
                         dense
                         onClick={() => {
-                          const profile = profileMenu.profile
+                          const profile = renderedProfileMenu.profile
                           setProfileMenu(null)
                           void refreshProfile(profile)
                         }}
@@ -3273,7 +3287,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openForm({ kind: 'edit', profile })
                       }}
@@ -3283,7 +3297,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openMergeEditor({ kind: 'profile', profile })
                       }}
@@ -3293,7 +3307,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openScriptEditor({ kind: 'profile', profile })
                       }}
@@ -3303,7 +3317,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openSequenceEditor({ kind: 'rules', profile })
                       }}
@@ -3313,7 +3327,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openSequenceEditor({ kind: 'proxies', profile })
                       }}
@@ -3323,7 +3337,7 @@ function App() {
                     <MenuItem
                       dense
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openSequenceEditor({ kind: 'groups', profile })
                       }}
@@ -3332,10 +3346,10 @@ function App() {
                     </MenuItem>
                     <MenuItem
                       dense
-                      disabled={profileMenu?.profile.id === doc.activeId}
+                      disabled={renderedProfileMenu?.profile.id === doc.activeId}
                       sx={{ color: 'error.main' }}
                       onClick={() => {
-                        const profile = profileMenu?.profile
+                        const profile = renderedProfileMenu?.profile
                         setProfileMenu(null)
                         if (profile) openForm({ kind: 'delete', profile })
                       }}
@@ -3345,7 +3359,7 @@ function App() {
                   </Menu>
                   <QrViewer
                     open={Boolean(qrProfile?.source)}
-                    value={qrProfile?.source ?? ''}
+                    value={renderedQrProfile?.source ?? ''}
                     onClose={() => setQrProfile(null)}
                   />
                 </>
@@ -4278,19 +4292,19 @@ function App() {
           <DialogTitle>
             {zhSettings.modals.update.title.replace(
               '{{version}}',
-              appUpdateInfo?.version ?? '',
+              renderedAppUpdateInfo?.version ?? '',
             )}
           </DialogTitle>
           <DialogContent dividers>
             <Stack spacing={2}>
               <Alert severity="info">{zhSettings.modals.update.messages.available}</Alert>
-              {appUpdateInfo?.body && (
+              {renderedAppUpdateInfo?.body && (
                 <Typography
                   variant="body2"
                   component="div"
                   sx={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
                 >
-                  {appUpdateInfo.body}
+                  {renderedAppUpdateInfo.body}
                 </Typography>
               )}
               {appUpdating && (
@@ -4310,9 +4324,10 @@ function App() {
           </DialogContent>
           <DialogActions>
             <Button
-              disabled={appUpdating || !appUpdateInfo?.htmlUrl}
+              disabled={appUpdating || !renderedAppUpdateInfo?.htmlUrl}
               onClick={() => {
-                if (appUpdateInfo?.htmlUrl) void api.openExternalUrl(appUpdateInfo.htmlUrl)
+                if (renderedAppUpdateInfo?.htmlUrl)
+                  void api.openExternalUrl(renderedAppUpdateInfo.htmlUrl)
               }}
             >
               {zhSettings.modals.update.actions.goToRelease}
@@ -4320,7 +4335,7 @@ function App() {
             <Button
               variant="contained"
               loading={appUpdating}
-              disabled={!appUpdateInfo}
+              disabled={!renderedAppUpdateInfo}
               onClick={() => void installAppUpdate()}
             >
               {zhSettings.modals.update.actions.update}
@@ -5246,11 +5261,11 @@ function App() {
           slotProps={{ paper: { sx: { borderRadius: 2 } } }}
         >
           <DialogTitle>
-            {sequenceTarget
-              ? `${sequenceTarget.profile.name} · ${
-                  sequenceTarget.kind === 'rules'
+            {renderedSequenceTarget
+              ? `${renderedSequenceTarget.profile.name} · ${
+                  renderedSequenceTarget.kind === 'rules'
                     ? zhProfiles.components.menu.editRules
-                    : sequenceTarget.kind === 'proxies'
+                    : renderedSequenceTarget.kind === 'proxies'
                       ? zhProfiles.components.menu.editProxies
                       : zhProfiles.components.menu.editGroups
                 }`
@@ -5267,9 +5282,9 @@ function App() {
                 value={sequenceDraft}
                 onChange={(event) => setSequenceDraft(event.target.value)}
                 placeholder={
-                  sequenceTarget?.kind === 'rules'
+                  renderedSequenceTarget?.kind === 'rules'
                     ? `prepend:\n  - DOMAIN-SUFFIX,example.com,DIRECT\nappend: []\ndelete:\n  - MATCH,DIRECT`
-                    : sequenceTarget?.kind === 'proxies'
+                    : renderedSequenceTarget?.kind === 'proxies'
                       ? `prepend:\n  - name: extra-node\n    type: direct\nappend: []\ndelete: []`
                       : `prepend:\n  - name: extra-group\n    type: select\n    proxies:\n      - DIRECT\nappend: []\ndelete: []`
                 }
@@ -5302,14 +5317,14 @@ function App() {
           slotProps={{ paper: { sx: { borderRadius: 2 } } }}
         >
           <DialogTitle>
-            {scriptTarget?.kind === 'global'
+            {renderedScriptTarget?.kind === 'global'
               ? zhProfiles.components.more.global.script
-              : `${scriptTarget?.profile.name ?? ''} · ${zhProfiles.components.menu.extendScript}`}
+              : `${renderedScriptTarget?.profile.name ?? ''} · ${zhProfiles.components.menu.extendScript}`}
           </DialogTitle>
           <DialogContent dividers>
             <Stack spacing={1.5}>
               <Alert severity="info">
-                {scriptTarget?.kind === 'global'
+                {renderedScriptTarget?.kind === 'global'
                   ? zhProfiles.modals.editor.enhance.globalScript
                   : zhProfiles.modals.editor.enhance.profileScript}
               </Alert>
@@ -5346,14 +5361,14 @@ function App() {
           slotProps={{ paper: { sx: { borderRadius: 2 } } }}
         >
           <DialogTitle>
-            {mergeTarget?.kind === 'global'
+            {renderedMergeTarget?.kind === 'global'
               ? zhProfiles.components.more.global.merge
-              : `${mergeTarget?.profile.name ?? ''} · ${zhProfiles.components.menu.extendConfig}`}
+              : `${renderedMergeTarget?.profile.name ?? ''} · ${zhProfiles.components.menu.extendConfig}`}
           </DialogTitle>
           <DialogContent dividers>
             <Stack spacing={1.5}>
               <Alert severity="info">
-                {mergeTarget?.kind === 'global'
+                {renderedMergeTarget?.kind === 'global'
                   ? zhProfiles.modals.editor.enhance.globalMerge
                   : zhProfiles.modals.editor.enhance.profileMerge}
               </Alert>
@@ -5390,48 +5405,52 @@ function App() {
           }}
           slotProps={{ paper: { sx: { borderRadius: 2 } } }}
         >
-          <Box component="form" onSubmit={submit}>
+          {renderedForm && <Box component="form" onSubmit={submit}>
             <DialogTitle>
-              {form?.kind === 'subscription'
-                ? zhProfiles.modals.profileForm.title.create
-                : form?.kind === 'nodes'
+              {renderedForm.kind === 'subscription'
+                ? zhProfiles.page.actions.import
+                : renderedForm.kind === 'nodes'
                   ? zhProfiles.page.actions.import
-                  : form?.kind === 'delete'
+                  : renderedForm.kind === 'delete'
                     ? zhProfiles.modals.confirmDelete.title
-                    : form?.kind === 'edit'
+                    : renderedForm.kind === 'edit'
                       ? zhProfiles.modals.profileForm.title.edit
-                    : form?.kind === 'copy'
+                    : renderedForm.kind === 'copy'
                       ? zhProfiles.modals.profileForm.title.create
                       : zhProfiles.page.actions.import}
             </DialogTitle>
             <DialogContent dividers>
-              {form?.kind === 'delete' ? (
+              {renderedForm.kind === 'delete' ? (
                 <Typography>{zhProfiles.modals.confirmDelete.message}</Typography>
               ) : (
                 <Stack spacing={2} sx={{ pt: 0.5 }}>
-                  <TextField
-                    name="name"
-                    label={zhShared.labels.name}
-                    autoComplete="off"
-                    required
-                    value={name}
-                    disabled={busy}
-                    onChange={(event) => setName(event.target.value)}
-                    fullWidth
-                    size="small"
-                  />
-                  <TextField
-                    name="description"
-                    label={zhProfiles.modals.profileForm.fields.description}
-                    autoComplete="off"
-                    value={description}
-                    disabled={busy}
-                    onChange={(event) => setDescription(event.target.value)}
-                    fullWidth
-                    size="small"
-                  />
-                  {(form?.kind === 'subscription' ||
-                    (form?.kind === 'edit' && Boolean(form.profile.source))) && (
+                  {renderedForm.kind !== 'subscription' && (
+                    <>
+                      <TextField
+                        name="name"
+                        label={zhShared.labels.name}
+                        autoComplete="off"
+                        required
+                        value={name}
+                        disabled={busy}
+                        onChange={(event) => setName(event.target.value)}
+                        fullWidth
+                        size="small"
+                      />
+                      <TextField
+                        name="description"
+                        label={zhProfiles.modals.profileForm.fields.description}
+                        autoComplete="off"
+                        value={description}
+                        disabled={busy}
+                        onChange={(event) => setDescription(event.target.value)}
+                        fullWidth
+                        size="small"
+                      />
+                    </>
+                  )}
+                  {(renderedForm.kind === 'subscription' ||
+                    (renderedForm.kind === 'edit' && Boolean(renderedForm.profile.source))) && (
                     <TextField
                       name="url"
                       label={zhProfiles.modals.profileForm.fields.subscriptionUrl}
@@ -5445,12 +5464,12 @@ function App() {
                       size="small"
                     />
                   )}
-                  {form?.kind !== 'subscription' && (
+                  {renderedForm.kind !== 'subscription' && (
                     <>
                       {(
-                        form?.kind === 'yaml' ||
-                        form?.kind === 'copy' ||
-                        form?.kind === 'edit'
+                        renderedForm.kind === 'yaml' ||
+                        renderedForm.kind === 'copy' ||
+                        renderedForm.kind === 'edit'
                       ) && (
                         <Button
                           component="label"
@@ -5484,7 +5503,7 @@ function App() {
                       )}
                       <TextField
                         name="content"
-                        label={form?.kind === 'nodes' ? 'URL' : 'YAML'}
+                        label={renderedForm.kind === 'nodes' ? 'URL' : 'YAML'}
                         required
                         multiline
                         minRows={9}
@@ -5492,7 +5511,7 @@ function App() {
                         value={content}
                         onChange={(event) => setContent(event.target.value)}
                         placeholder={
-                          form?.kind === 'nodes'
+                          renderedForm.kind === 'nodes'
                             ? 'vless://…\nhysteria2://…\nanytls://…'
                             : 'proxies:\n  …\nproxy-groups:\n  …\nrules:\n  …'
                         }
@@ -5501,8 +5520,7 @@ function App() {
                       />
                     </>
                   )}
-                  {(form?.kind === 'subscription' ||
-                    (form?.kind === 'edit' && Boolean(form.profile.source))) && (
+                  {renderedForm.kind === 'edit' && Boolean(renderedForm.profile.source) && (
                     <SettingList title={zhProfiles.modals.profileForm.title.edit}>
                       <SettingItem label={zhProfiles.modals.profileForm.fields.allowAutoUpdate}>
                         <Switch
@@ -5600,18 +5618,18 @@ function App() {
                 {zhShared.actions.cancel}
               </Button>
               <Button
-                color={form?.kind === 'delete' ? 'error' : 'primary'}
+                color={renderedForm.kind === 'delete' ? 'error' : 'primary'}
                 variant="contained"
                 type="submit"
                 disabled={!canEdit}
                 startIcon={
-                  form?.kind === 'delete' ? (
+                  renderedForm.kind === 'delete' ? (
                     <DeleteOutlineRounded />
-                  ) : form?.kind === 'copy' ? (
+                  ) : renderedForm.kind === 'copy' ? (
                     <ContentCopyRounded />
-                  ) : form?.kind === 'edit' ? (
+                  ) : renderedForm.kind === 'edit' ? (
                     <StorageOutlined />
-                  ) : form?.kind === 'subscription' ? (
+                  ) : renderedForm.kind === 'subscription' ? (
                     <CloudUploadOutlined />
                   ) : (
                     <AddRounded />
@@ -5620,18 +5638,18 @@ function App() {
               >
                 {busy
                   ? zhShared.statuses.saving
-                  : form?.kind === 'subscription'
+                  : renderedForm.kind === 'subscription'
                     ? zhProfiles.page.actions.import
-                    : form?.kind === 'delete'
+                    : renderedForm.kind === 'delete'
                       ? zhShared.actions.delete
-                      : form?.kind === 'edit'
+                      : renderedForm.kind === 'edit'
                         ? zhShared.actions.save
-                      : form?.kind === 'copy'
+                      : renderedForm.kind === 'copy'
                         ? zhShared.actions.save
                         : zhProfiles.page.actions.import}
               </Button>
             </DialogActions>
-          </Box>
+          </Box>}
         </Dialog>
       </div>
     </VergeMobileTheme>

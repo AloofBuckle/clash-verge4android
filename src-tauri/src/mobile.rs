@@ -1094,6 +1094,7 @@ async fn mobile_set_profile_script(
 
 #[derive(Clone, Debug)]
 struct DownloadedSubscription {
+    name: String,
     yaml: String,
     extra: Option<ProfileExtra>,
     home: Option<String>,
@@ -1128,6 +1129,42 @@ fn normalize_profile_home_url(value: &str) -> Option<String> {
     Some(url.to_string())
 }
 
+fn subscription_name_from_response(headers: &reqwest::header::HeaderMap, url: &reqwest::Url) -> String {
+    let from_disposition = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            let parts = value.split(';').map(str::trim).collect::<Vec<_>>();
+            ["filename*", "filename"].into_iter().find_map(|wanted| {
+                parts.iter().find_map(|part| {
+                    let (key, raw) = part.split_once('=')?;
+                    if !key.trim().eq_ignore_ascii_case(wanted) {
+                        return None;
+                    }
+                    let mut raw = raw.trim().trim_matches('"');
+                    if wanted == "filename*" {
+                        raw = raw.split_once("''").map(|(_, value)| value).unwrap_or(raw);
+                    }
+                    percent_decode_str(raw)
+                        .decode_utf8()
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })
+            })
+        });
+    if let Some(name) = from_disposition {
+        return name;
+    }
+
+    url.path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .and_then(|segment| percent_decode_str(segment).decode_utf8().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Remote File".into())
+}
+
 async fn download(
     client: &reqwest::Client,
     source: &str,
@@ -1142,7 +1179,7 @@ async fn download(
         return Err("Use an HTTP(S) subscription URL without userinfo".into());
     }
     let mut response = client
-        .get(url)
+        .get(url.clone())
         .header("User-Agent", user_agent.unwrap_or("ClashVerge4Android/0.1.0"))
         .send()
         .await
@@ -1150,6 +1187,7 @@ async fn download(
         .error_for_status()
         .map_err(|e| format!("Subscription HTTP error: {}", e.without_url()))?;
     let headers = response.headers().clone();
+    let name = subscription_name_from_response(&headers, &url);
     let extra = headers.iter().find_map(|(name, value)| {
         let key = name.as_str().to_ascii_lowercase();
         key.strip_suffix("subscription-userinfo")
@@ -1182,6 +1220,7 @@ async fn download(
     let yaml = String::from_utf8(data).map_err(|_| "Subscription is not UTF-8".to_owned())?;
     clash_verge_mobile::inspect(&yaml)?;
     Ok(DownloadedSubscription {
+        name,
         yaml,
         extra,
         home,
@@ -1350,24 +1389,36 @@ fn stage_online_core(app_data_dir: &Path, package: &[u8]) -> Result<PathBuf, Str
 }
 
 #[tauri::command]
-async fn mobile_subscribe(
-    name: String,
-    description: Option<String>,
-    url: String,
-    option: Option<ProfileOptions>,
-    state: State<'_, MobileState>,
-) -> Result<Document, String> {
-    let mut option = option.unwrap_or_default().normalized()?;
-    let downloaded = download_subscription(&state, url.trim(), &option).await?;
+async fn mobile_subscribe(url: String, state: State<'_, MobileState>) -> Result<Document, String> {
+    let source = url.trim();
+    if source.is_empty() {
+        return Err("Subscription URL is required".into());
+    }
+
+    let mut option = ProfileOptions::default().normalized()?;
+    let downloaded = match download_subscription(&state, source, &option).await {
+        Ok(downloaded) => downloaded,
+        Err(direct_error) => {
+            let mut retry_option = option.clone();
+            retry_option.self_proxy = Some(true);
+            match download_subscription(&state, source, &retry_option).await {
+                Ok(downloaded) => {
+                    option = retry_option;
+                    downloaded
+                }
+                Err(_) => return Err(direct_error),
+            }
+        }
+    };
     if option.update_interval.is_none() {
         option.update_interval = downloaded.update_interval;
     }
     state.store.lock().map_err(|e| e.to_string())?.import_with_metadata(
-        name,
+        downloaded.name,
         downloaded.yaml,
-        Some(url.trim().to_owned()),
+        Some(source.to_owned()),
         option,
-        description,
+        None,
         downloaded.home,
         downloaded.extra,
     )

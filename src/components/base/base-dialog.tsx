@@ -7,7 +7,7 @@ import {
   type SxProps,
   type Theme,
 } from '@mui/material'
-import { ReactNode } from 'react'
+import { ReactNode, useRef } from 'react'
 
 interface Props {
   title: ReactNode
@@ -47,26 +47,69 @@ export const BaseDialog: React.FC<Props> = ({
   onCancel,
   onClose,
 }) => {
+  // MUI leaves the dialog subtree mounted while the exit transition runs.
+  // Callers often use the same nullable state as both the `open` flag and the
+  // dialog payload, so closing it clears the payload one render before the
+  // dialog disappears. Retain the last visible presentation while closing to
+  // prevent fallback/empty UI from flashing during that transition.
+  const retained = useRef({
+    title,
+    children,
+    okBtn,
+    cancelBtn,
+    contentSx,
+    disableCancel,
+    disableOk,
+    disableFooter,
+    loading,
+  })
+  if (open) {
+    retained.current = {
+      title,
+      children,
+      okBtn,
+      cancelBtn,
+      contentSx,
+      disableCancel,
+      disableOk,
+      disableFooter,
+      loading,
+    }
+  }
+  const visible = open
+    ? {
+        title,
+        children,
+        okBtn,
+        cancelBtn,
+        contentSx,
+        disableCancel,
+        disableOk,
+        disableFooter,
+        loading,
+      }
+    : retained.current
+
   return (
     <Dialog
       open={open}
       onClose={onClose}
       disableEnforceFocus={disableEnforceFocus}
     >
-      <DialogTitle>{title}</DialogTitle>
+      <DialogTitle>{visible.title}</DialogTitle>
 
-      <DialogContent sx={contentSx}>{children}</DialogContent>
+      <DialogContent sx={visible.contentSx}>{visible.children}</DialogContent>
 
-      {!disableFooter && (
+      {!visible.disableFooter && (
         <DialogActions>
-          {!disableCancel && (
+          {!visible.disableCancel && (
             <Button variant="outlined" onClick={onCancel}>
-              {cancelBtn}
+              {visible.cancelBtn}
             </Button>
           )}
-          {!disableOk && (
-            <Button loading={loading} variant="contained" onClick={onOk}>
-              {okBtn}
+          {!visible.disableOk && (
+            <Button loading={visible.loading} variant="contained" onClick={onOk}>
+              {visible.okBtn}
             </Button>
           )}
         </DialogActions>

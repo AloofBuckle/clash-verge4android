@@ -290,12 +290,8 @@ export const api = {
     invoke<ProfileDocument>('mobile_import', { name, yaml }),
   importNodes: (name: string, links: string) =>
     invoke<ProfileDocument>('mobile_import_nodes', { name, links }),
-  subscribe: (
-    name: string,
-    description: string | null,
-    url: string,
-    option?: ProfileOptions,
-  ) => invoke<ProfileDocument>('mobile_subscribe', { name, description, url, option }),
+  subscribe: (url: string) =>
+    invoke<ProfileDocument>('mobile_subscribe', { url }),
   activate: (id: string) => invoke<ProfileDocument>('mobile_activate', { id }),
   remove: (id: string) => invoke<ProfileDocument>('mobile_delete', { id }),
   removeMany: (ids: string[]) =>
